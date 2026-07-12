@@ -38,13 +38,9 @@ scripts/register.bteq.local
 # Generated UDF registration
 scripts/register.generated.bteq
 
-# Release staging (only top-level packaging dirs — not Java package io/trino/plugin/)
+# Release staging only (NOT plugin/trino-teradata source module)
 /dist/
-/plugin/
-scripts/register.generated.bteq
 
 # Test outputs
-testing/trino-tests/test_output.log
 testing/**/surefire-reports/
 testing/**/stress_results*/
-scripts/register.generated.bteq
