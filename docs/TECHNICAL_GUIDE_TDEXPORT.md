@@ -181,6 +181,12 @@ plugin/trino-teradata/target/trino-teradata-479-1-SNAPSHOT.zip
 
 SPI jars are **not** bundled (`provided` scope enforced by `trino-maven-plugin`).
 
+**Prebuilt (no Maven):** the repository also ships
+`prebuilt/trino-teradata-479-1-SNAPSHOT.zip`. Unpack into
+`$TRINO_HOME/plugin/teradata-export/`, copy proprietary `terajdbc4.jar` into
+the same directory, configure the catalog, restart. See
+[prebuilt/README.md](../prebuilt/README.md) and [installation.md](installation.md).
+
 ### 6.2 Deploy
 
 ```bash
@@ -189,6 +195,15 @@ export TERADATA_JDBC_JAR=/path/to/terajdbc4.jar
 ./scripts/deploy.sh
 # multi-node lab:
 # export TRINO_WORKER_1=... && ./scripts/build_deploy_restart.sh
+```
+
+Or from prebuilt:
+
+```bash
+PLUGIN_DIR=$TRINO_HOME/plugin/teradata-export
+mkdir -p "$PLUGIN_DIR"
+unzip -j prebuilt/trino-teradata-479-1-SNAPSHOT.zip -d "$PLUGIN_DIR"
+cp "$TERADATA_JDBC_JAR" "$PLUGIN_DIR/terajdbc4.jar"
 ```
 
 Catalog: copy `config/teradata-export.properties.example` →

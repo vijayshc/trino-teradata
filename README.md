@@ -54,39 +54,50 @@ docs/                             # architecture, install, EOS, config
 
 ## Quick start
 
-### Option A — prebuilt (no Maven)
+Users can install **without building**: unpack the prebuilt plugin ZIP into Trino,
+add proprietary `terajdbc4.jar`, configure the catalog, and restart.
+
+### 1. Install the plugin (every Trino node)
+
+**Option A — prebuilt (no Maven)** — recommended for labs / evaluation:
 
 ```bash
 export TRINO_HOME=/path/to/trino-server-479
-export TERADATA_JDBC_JAR=/path/to/terajdbc4.jar   # BYO
+export TERADATA_JDBC_JAR=/path/to/terajdbc4.jar   # BYO — not in this repo
 
 PLUGIN_DIR="$TRINO_HOME/plugin/teradata-export"
 mkdir -p "$PLUGIN_DIR"
+# Unpack connector + runtime deps into the plugin directory
 unzip -j prebuilt/trino-teradata-479-1-SNAPSHOT.zip -d "$PLUGIN_DIR"
+# Required: proprietary Teradata JDBC (obtain from Teradata)
 cp "$TERADATA_JDBC_JAR" "$PLUGIN_DIR/terajdbc4.jar"
-# then catalog + restart (below)
 ```
 
-See [prebuilt/README.md](prebuilt/README.md).
+Details and checksums: [prebuilt/README.md](prebuilt/README.md).
 
-### Option B — build from source
+**Option B — build from source:**
 
 ```bash
-# Build
 export JAVA_HOME=/path/to/jdk-25
 ./mvnw -pl plugin/trino-teradata -am clean package
-
-# Deploy (every Trino node)
-export TRINO_HOME=/path/to/trino-server
+export TRINO_HOME=/path/to/trino-server-479
 export TERADATA_JDBC_JAR=/path/to/terajdbc4.jar
-./scripts/deploy.sh
+./scripts/deploy.sh    # copies target jars + terajdbc into plugin dir
+```
 
-# Catalog
+Repeat plugin install on **every** coordinator and worker.
+
+### 2. Catalog, restart, UDF
+
+```bash
+# Catalog (coordinator; workers need the plugin but usually not a catalog file)
 cp config/teradata-export.properties.example \
    $TRINO_HOME/etc/catalog/tdexport.properties
-# edit host, credentials, worker-advertised-addresses → restart Trino
+# edit host, credentials, worker-advertised-addresses
 
-# UDF on Teradata
+# Restart Trino on every node that received the plugin
+
+# UDF on Teradata (once per TD system)
 export TD_HOST=... TD_LOGON_USER=... TD_LOGON_PASSWORD=...
 export UDF_SRC_DIR="$(pwd)/teradata-udf"   # path must be readable by TD
 ./scripts/register_udf.sh && RUN_BTEQ=1 ./scripts/register_udf.sh
@@ -105,9 +116,10 @@ SELECT COUNT(*) FROM tdexport.<schema>.<table>;
 
 | Document | Contents |
 |----------|----------|
+| [prebuilt/README.md](prebuilt/README.md) | Prebuilt ZIP install (copy jars + BYO JDBC) |
+| [docs/installation.md](docs/installation.md) | Full install (prebuilt or build), UDF, network |
 | [docs/architecture.md](docs/architecture.md) | Control/data plane, routing, security model |
 | [docs/eos.md](docs/eos.md) | Deterministic EOS design |
-| [docs/installation.md](docs/installation.md) | Build, install, UDF, network |
 | [docs/configuration.md](docs/configuration.md) | Catalog property reference |
 | [docs/TECHNICAL_GUIDE_TDEXPORT.md](docs/TECHNICAL_GUIDE_TDEXPORT.md) | Full technical guide |
 | [docs/development.md](docs/development.md) | SPI packaging & contributor standards |

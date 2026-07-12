@@ -18,6 +18,8 @@ Rebuild / refresh:
 
 ## Install (no Maven required)
 
+Typical flow: **unpack prebuilt ZIP → add `terajdbc4.jar` → catalog → restart**.
+
 ```bash
 export TRINO_HOME=/path/to/trino-server-479
 export TERADATA_JDBC_JAR=/path/to/terajdbc4.jar   # BYO — not in this repo
@@ -26,20 +28,32 @@ PLUGIN_DIR="$TRINO_HOME/plugin/teradata-export"
 rm -rf "$PLUGIN_DIR"
 mkdir -p "$PLUGIN_DIR"
 
-# ZIP extracts to trino-teradata-479-1-SNAPSHOT/*.jar
+# 1) Open-source connector + runtime dependency JARs
+#    ZIP contains trino-teradata-479-1-SNAPSHOT/*.jar; -j flattens into PLUGIN_DIR
 unzip -j prebuilt/trino-teradata-479-1-SNAPSHOT.zip -d "$PLUGIN_DIR"
+
+# 2) Proprietary Teradata JDBC (required for the plugin to load / connect)
 cp "$TERADATA_JDBC_JAR" "$PLUGIN_DIR/terajdbc4.jar"
 
-# Catalog (every coordinator/worker)
+# 3) Catalog on the coordinator
 cp config/teradata-export.properties.example \
    "$TRINO_HOME/etc/catalog/tdexport.properties"
-# edit host, credentials, worker-advertised-addresses
+# edit: teradata.url, user/password, worker-advertised-addresses
+# connector.name must remain teradata_export
 
-# Restart Trino on every node
+# 4) Restart Trino on every node that received the plugin
 ```
 
-Repeat the plugin install on **every** worker. Register the Teradata UDF from
-`teradata-udf/` (see [docs/installation.md](../docs/installation.md)).
+Repeat steps 1–2 (plugin + JDBC) on **every** worker, then restart those nodes.
+Register the Teradata UDF from `teradata-udf/` (see
+[docs/installation.md](../docs/installation.md)).
+
+After restart, a basic check:
+
+```sql
+SHOW CATALOGS;
+SHOW SCHEMAS FROM tdexport;
+```
 
 ## Verify integrity
 
