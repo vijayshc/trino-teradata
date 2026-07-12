@@ -55,7 +55,7 @@ public abstract class BaseTdExportTest {
     protected static final String TRINO_USER = firstNonBlank(
             System.getProperty("trino.user"),
             System.getenv("TRINO_USER"),
-            "vijay");
+            "trino");
     protected static final String LOG_PATH = firstNonBlank(
             System.getProperty("trino.server.log"),
             System.getenv("TRINO_SERVER_LOG"),

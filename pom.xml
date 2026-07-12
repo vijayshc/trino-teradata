@@ -29,7 +29,6 @@
         High-performance open-source Trino connector for Teradata using a
         parallel binary bridge and Teradata table operator.
     </description>
-    <url>https://github.com/vijayshc/trino-teradata-connector</url>
     <inceptionYear>2025</inceptionYear>
 
     <licenses>

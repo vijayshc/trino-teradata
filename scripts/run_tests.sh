@@ -9,7 +9,7 @@ source "$SCRIPT_DIR/lib_env.sh"
 cd "$PROJECT_DIR"
 
 export TRINO_JDBC_URL="${TRINO_JDBC_URL:-jdbc:trino://localhost:8080/tdexport/trinoexport}"
-export TRINO_USER="${TRINO_USER:-vijay}"
+export TRINO_USER="${TRINO_USER:-trino}"
 export TRINO_SERVER_LOG="${TRINO_SERVER_LOG:-$HOME/tdconnector/trino_server/trino-server-479/data/var/log/server.log}"
 
 MVN_ARGS=(

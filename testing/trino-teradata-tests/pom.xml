@@ -32,7 +32,7 @@
 
     <properties>
         <trino.jdbc.url>jdbc:trino://localhost:8080/tdexport/trinoexport</trino.jdbc.url>
-        <trino.user>vijay</trino.user>
+        <trino.user>trino</trino.user>
         <trino.server.log></trino.server.log>
     </properties>
 
