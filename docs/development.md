@@ -88,12 +88,10 @@ Live tests require Trino + Teradata. They are **skipped by default** (`skipITs=t
 ./mvnw -pl testing/trino-teradata-tests -am test -DskipITs=false
 ```
 
-## License checks
+## License headers
 
-```bash
-./mvnw license:check
-./mvnw license:format   # add missing headers
-```
+All Java sources must carry the Apache-2.0 header (see `license-header.txt`).
+CI greps for the header text on every PR.
 
 ## What we intentionally diverge from upstream Trino
 

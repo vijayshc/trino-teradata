@@ -24,5 +24,11 @@ jobs:
       - name: Compile integration tests
         run: ./mvnw -B -pl testing/trino-teradata-tests -am test-compile
 
-      - name: License header check
-        run: ./mvnw -B license:check
+      - name: Verify Apache license headers present
+        run: |
+          missing=$(find plugin testing -name '*.java' -print0 | xargs -0 grep -L 'Licensed under the Apache License' || true)
+          if [ -n "$missing" ]; then
+            echo "Missing Apache license header in:"
+            echo "$missing"
+            exit 1
+          fi

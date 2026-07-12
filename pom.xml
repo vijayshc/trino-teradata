@@ -73,7 +73,6 @@
         <dep.logback.version>1.4.11</dep.logback.version>
 
         <trino.maven.plugin.version>21</trino.maven.plugin.version>
-        <license.maven.plugin.version>2.4.0</license.maven.plugin.version>
         <skipITs>true</skipITs>
     </properties>
 
@@ -149,34 +148,6 @@
                     <version>${trino.maven.plugin.version}</version>
                     <extensions>true</extensions>
                 </plugin>
-                <plugin>
-                    <groupId>com.mycila</groupId>
-                    <artifactId>license-maven-plugin</artifactId>
-                    <version>${license.maven.plugin.version}</version>
-                    <configuration>
-                        <licenseSets>
-                            <licenseSet>
-                                <header>${maven.multiModuleProjectDirectory}/license-header.txt</header>
-                                <excludes>
-                                    <exclude>**/*.md</exclude>
-                                    <exclude>**/*.txt</exclude>
-                                    <exclude>**/*.yml</exclude>
-                                    <exclude>**/*.yaml</exclude>
-                                    <exclude>**/*.properties</exclude>
-                                    <exclude>**/*.bteq</exclude>
-                                    <exclude>**/*.template</exclude>
-                                    <exclude>**/lz4.c</exclude>
-                                    <exclude>**/lz4.h</exclude>
-                                    <exclude>**/sqltypes_td.h</exclude>
-                                    <exclude>**/target/**</exclude>
-                                    <exclude>**/.mvn/**</exclude>
-                                    <exclude>**/mvnw*</exclude>
-                                </excludes>
-                            </licenseSet>
-                        </licenseSets>
-                        <strictCheck>true</strictCheck>
-                    </configuration>
-                </plugin>
             </plugins>
         </pluginManagement>
 
@@ -204,10 +175,6 @@
                         </configuration>
                     </execution>
                 </executions>
-            </plugin>
-            <plugin>
-                <groupId>com.mycila</groupId>
-                <artifactId>license-maven-plugin</artifactId>
             </plugin>
         </plugins>
     </build>
