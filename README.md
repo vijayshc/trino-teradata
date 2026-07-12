@@ -45,8 +45,9 @@ Generic JDBC extract is row-at-a-time and coordinator-heavy. This connector:
 plugin/trino-teradata/            # Trino plugin (packaging: trino-plugin)
 teradata-udf/                     # ExportToTrino C table operator + LZ4
 testing/trino-teradata-tests/     # Live-cluster integration tests
+testing/trino-teradata-stress/    # Concurrent stress + bottleneck tools
 config/*.example                  # Catalog template (no secrets)
-scripts/                          # build / deploy / UDF / tests
+scripts/                          # build / deploy / UDF / tests / stress
 docs/                             # architecture, install, EOS, config
 ```
 
@@ -102,8 +103,11 @@ SELECT COUNT(*) FROM tdexport.<schema>.<table>;
 cp dev/env.example dev/local.env             # gitignored lab overrides
 ./scripts/build_deploy_restart.sh            # optional multi-node lab
 ./scripts/run_tests.sh                       # full integration suite
+./scripts/run_stress.sh quick                # concurrent load smoke
+./scripts/run_stress.sh test --concurrency 50
 ```
 
+Stress tools live under [`testing/trino-teradata-stress/`](testing/trino-teradata-stress/README.md).
 See [docs/development.md](docs/development.md).
 
 ## Compatibility

@@ -14,11 +14,12 @@ as closely as practical for a **standalone** community connector (not part of th
 ## Layout
 
 ```text
-plugin/trino-teradata/         # packaging: trino-plugin
-testing/trino-teradata-tests/  # live-cluster integration tests
-teradata-udf/                  # C table operator (not a Trino plugin)
-docs/                          # architecture, install, EOS, config
-config/                        # *.example only (no secrets)
+plugin/trino-teradata/          # packaging: trino-plugin
+testing/trino-teradata-tests/   # live-cluster integration tests
+testing/trino-teradata-stress/  # concurrent stress + bottleneck CLI
+teradata-udf/                   # C table operator (not a Trino plugin)
+docs/                           # architecture, install, EOS, config
+config/                         # *.example only (no secrets)
 scripts/
 ```
 
@@ -65,7 +66,11 @@ Do not reintroduce JDBC_FINISHED-driven EOS as the primary path.
 export JAVA_HOME=/path/to/jdk-25
 ./mvnw clean verify
 ./mvnw -pl plugin/trino-teradata package
+./mvnw -pl testing/trino-teradata-stress -am package -DskipTests
+./scripts/run_stress.sh quick    # live cluster required
 ```
+
+See [testing/trino-teradata-stress/README.md](../testing/trino-teradata-stress/README.md).
 
 Plugin output:
 
