@@ -1,7 +1,7 @@
 # Development guide
 
 This project follows [Trino plugin development practices](https://trino.io/docs/current/develop/spi-overview.html)
-as closely as possible for a **standalone** connector (not part of the trinodb monorepo).
+as closely as practical for a **standalone** community connector (not part of the trinodb monorepo).
 
 ## Requirements
 
@@ -9,92 +9,109 @@ as closely as possible for a **standalone** connector (not part of the trinodb m
 |------|---------|--------|
 | JDK | **25+** | Trino 479 SPI is Java 25 bytecode |
 | Maven | **3.9.1+** | Required by `trino-maven-plugin`; use `./mvnw` |
-| Trino | **479** | SPI version is pinned via `dep.trino.version` |
+| Trino | **479** | SPI version pinned via `dep.trino.version` |
 
-## Layout (mirrors Trino monorepo conventions)
+## Layout
 
 ```text
-plugin/trino-teradata/     # connector module (packaging: trino-plugin)
+plugin/trino-teradata/         # packaging: trino-plugin
 testing/trino-teradata-tests/  # live-cluster integration tests
-teradata-udf/              # C table operator (not a Trino plugin)
-docs/
-config/
+teradata-udf/                  # C table operator (not a Trino plugin)
+docs/                          # architecture, install, EOS, config
+config/                        # *.example only (no secrets)
 scripts/
 ```
 
 ## SPI rules (mandatory)
 
-From the Trino SPI overview:
-
-1. **Plugin entry point** implements `io.trino.spi.Plugin`.
-2. Packaging is **`trino-plugin`** (via `io.trino:trino-maven-plugin`), which:
+1. Plugin entry implements `io.trino.spi.Plugin` (`TrinoExportPlugin`).
+2. Module packaging is **`trino-plugin`** (`io.trino:trino-maven-plugin`):
    - generates the `META-INF/services` descriptor
-   - assembles a plugin directory + ZIP with dependencies (Provisio)
-3. **`trino-spi` is `provided`** — never ship SPI classes inside the plugin.
+   - Provisio assembles `target/<artifact>-<version>/` + `.zip`
+3. **`trino-spi` is `provided`** — never ship SPI classes in the plugin.
 4. Also **`provided`**: `slice`, `jackson-annotations`, OpenTelemetry APIs
-   (supplied by the Trino server classloader).
-5. **Version compatibility**: build and deploy against the **same** Trino version
-   (`dep.trino.version` in the root POM).
+   (and incubator/common as required by the SPI checker).
+5. Deploy with the **same** Trino version used to compile
+   ([compatibility](https://trino.io/docs/current/develop/spi-overview.html#compatibility)).
 
-## Coding standards (aligned with Trino)
+## Coding standards
 
-See [Trino DEVELOPMENT.md](https://github.com/trinodb/trino/blob/master/.github/DEVELOPMENT.md):
+Aligned with [Trino DEVELOPMENT.md](https://github.com/trinodb/trino/blob/master/.github/DEVELOPMENT.md):
 
-| Practice | Status in this repo |
-|----------|---------------------|
-| Apache-2.0 license header on sources | Enforced via `license-maven-plugin` |
+| Practice | Status |
+|----------|--------|
+| Apache-2.0 license header on Java sources | Required; CI greps for header text |
 | Guava `ImmutableList` / immutables | Preferred in new code |
-| Airlift `Logger` (not `System.out`) | Required — no debug stdout |
+| Airlift `Logger` (not `System.out`) | Required |
 | AssertJ for tests | Yes |
 | No mocking libraries | Prefer hand-written fakes |
-| Categorized errors (`TrinoException`) | Prefer for user-facing failures |
+| `TrinoException` for user-facing errors | Prefer categorized errors |
 | `requireNonNull` on public APIs | Yes |
-| Opening-brace style (Allman) | Follow in **new** code; bulk reformat deferred |
+| Allman brace style | Prefer for **new** code; bulk reformat deferred |
+| Deterministic EOS (not timeout-first) | Do not regress without design review |
+
+## Architecture to preserve
+
+- **Control plane:** JDBC + pushdown + UDF invocation  
+- **Data plane:** binary bridge + `DirectTrinoPageParser`  
+- **EOS:** expected per-worker AMP counts from routing PIDs ([eos.md](eos.md))  
+- **Security:** `PROXYUSER` + per-query tokens  
+
+Do not reintroduce JDBC_FINISHED-driven EOS as the primary path.
 
 ## Build
 
 ```bash
 export JAVA_HOME=/path/to/jdk-25
-./mvnw clean verify          # unit tests; skips live ITs
+./mvnw clean verify
 ./mvnw -pl plugin/trino-teradata package
 ```
 
-Plugin output (Trino-standard layout):
+Plugin output:
 
 ```text
 plugin/trino-teradata/target/trino-teradata-479-1-SNAPSHOT/
 plugin/trino-teradata/target/trino-teradata-479-1-SNAPSHOT.zip
 ```
 
-Install by copying the directory to `$TRINO_HOME/plugin/trino-teradata/`
-(or `teradata-export/`) and adding proprietary `terajdbc4.jar`.
-
-Convenience scripts:
+Install directory name under `$TRINO_HOME/plugin/` is free-form (scripts use
+`teradata-export`); always add proprietary `terajdbc4.jar`.
 
 ```bash
 ./scripts/build.sh
-./scripts/deploy.sh                 # needs TRINO_HOME + TERADATA_JDBC_JAR
-./scripts/build_deploy_restart.sh   # lab multi-node
-./scripts/run_tests.sh              # full integration suite
+./scripts/deploy.sh                 # TRINO_HOME + TERADATA_JDBC_JAR
+./scripts/build_deploy_restart.sh   # multi-node lab helper
+./scripts/run_tests.sh              # integration suite
 ```
 
 ## Integration tests
 
-Live tests require Trino + Teradata. They are **skipped by default** (`skipITs=true`).
+Live tests need Trino + Teradata. Default Maven build sets `skipITs=true`.
 
 ```bash
 ./scripts/run_tests.sh
-# or
 ./mvnw -pl testing/trino-teradata-tests -am test -DskipITs=false
 ```
 
+Env overrides: `TRINO_JDBC_URL`, `TRINO_USER`, `TRINO_SERVER_LOG` (see `dev/env.example`).
+
 ## License headers
 
-All Java sources must carry the Apache-2.0 header (see `license-header.txt`).
-CI greps for the header text on every PR.
+All Java sources must include the Apache-2.0 header (`license-header.txt`).
+CI fails if the license line is missing.
 
-## What we intentionally diverge from upstream Trino
+## Intentional divergences from upstream Trino
 
-- **groupId** is `io.github.trino-teradata` (not `io.trino`) — this is a community plugin.
-- **No** full Airbase/Error Prone monorepo parent (heavy; external plugins rarely vendor it).
-- Integration tests use JDBC against a real cluster (not full `trino-testing` DistributedQueryRunner) because Teradata cannot be containerized easily.
+| Topic | Upstream | This repo |
+|-------|----------|-----------|
+| groupId | `io.trino` | `io.github.trino-teradata` (community) |
+| Parent POM | Airbase monorepo | Lightweight standalone parent |
+| Integration tests | `trino-testing` / containers | Live JDBC suite (Teradata not easily containerized) |
+| Brace style | Strict Allman | Preferred for new code only |
+
+## Useful links
+
+- [architecture.md](architecture.md)
+- [installation.md](installation.md)
+- [configuration.md](configuration.md)
+- [TECHNICAL_GUIDE_TDEXPORT.md](TECHNICAL_GUIDE_TDEXPORT.md)

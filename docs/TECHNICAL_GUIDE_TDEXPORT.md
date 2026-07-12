@@ -1,500 +1,262 @@
-# Teradata to Trino Export Connector: Technical Guide
+# Technical guide: Trino Teradata Direct connector
 
-This document serves as a comprehensive technical guide for the Teradata to Trino Export Connector. It details the architecture, configuration, implementation specifics, and operational procedures.
+Comprehensive operator and implementer guide for the open-source Trino Teradata
+Direct connector (Apache License 2.0).
+
+| Related docs | |
+|--------------|--|
+| [architecture.md](architecture.md) | Control/data plane, routing, EOS overview |
+| [eos.md](eos.md) | Deterministic end-of-stream details |
+| [installation.md](installation.md) | Build, deploy, UDF, network |
+| [configuration.md](configuration.md) | Full property reference |
+| [development.md](development.md) | SPI packaging & coding standards |
+| [../SECURITY.md](../SECURITY.md) | Threat model & hardening |
 
 ---
 
-## 1. System Architecture
+## 1. System architecture
 
-The export process follows a **synchronous, zero-copy pipeline** designed for high-performance data transfer from Teradata's parallel environment to Trino with 100% data reliability.
+The connector implements a **synchronous, integrity-first** pipeline: control
+via JDBC, bulk data via a parallel binary bridge.
 
-### Data Flow Pipeline:
-1.  **Trino Query Planner**: Generates an optimized plan using the `teradata-export` connector.
-2.  **SQL Generation**: `TeradataClient` (extending `BaseJdbcClient`) and `TeradataQueryBuilder` leverage Trino's internal JDBC infrastructure to generate optimized Teradata SQL, including predicate, aggregate, and join pushdowns.
-3.  **Table Operator Wrapping**: The generated SQL is wrapped with the `ExportToTrino()` Table Operator UDF.
-4.  **Teradata Execution**: Teradata executes the query in parallel across all AMPs.
-5.  **C Table Operator (UDF)**: Processes rows on each AMP, serializes them into packed binary format, compresses (ZLIB/LZ4), and sends via TCP sockets to the appropriate Trino worker.
-6.  **Java Bridge Server**: Multi-threaded server integrated into Trino Worker JVM. Receives and decompresses binary data.
-7.  **DirectTrinoPageParser**: High-performance parser that converts binary data directly to Trino `Page` objects.
-8.  **DataBufferRegistry**: Synchronous thread-safe queue for parsed Pages.
-9.  **Trino PageSource**: Consumes Pages from the buffer for the Trino engine.
+### Data flow
 
-### AMP-to-Worker Distribution (No Data Duplication)
+1. **Trino planner** — catalog `teradata_export`; pushdown via `TeradataClient` / `TeradataQueryBuilder`.
+2. **SQL generation** — predicates, aggregations, joins, TopN rewritten to Teradata SQL where safe.
+3. **Table operator wrap** — SQL executed as input to `ExportToTrino(...)`.
+4. **AMP execution** — each participating AMP serializes rows, compresses (LZ4/ZLIB), opens one TCP socket to its assigned worker.
+5. **Bridge server** — embedded in each Trino worker JVM; authenticates token, receives batches.
+6. **DirectTrinoPageParser** — binary → Trino `Page` (no Arrow hot path).
+7. **DataBufferRegistry** — per-query queues + **deterministic EOS**.
+8. **PageSource** — feeds the Trino engine.
 
-The connector ensures that **each Teradata AMP sends data to exactly one Trino worker**, preventing data duplication:
+### AMP-to-worker distribution
 
-```
-Teradata AMPs (128)                     Trino Workers (N)
-├── AMP 0  ──────────────────────────► Worker 0 (Bridge on port 9999)
-├── AMP 1  ──────────────────────────► Worker 1 (Bridge on port 9999)
-├── AMP 2  ──────────────────────────► Worker 2 (Bridge on port 9999)
-├── AMP 3  ──────────────────────────► Worker 0  (round-robin)
-├── AMP 4  ──────────────────────────► Worker 1
+```text
+Teradata AMPs                               Trino workers
+AMP routing_id % N == 0  ───────────────►  Worker 0 bridge
+AMP routing_id % N == 1  ───────────────►  Worker 1 bridge
 ...
-└── AMP 127 ─────────────────────────► Worker (127 % N)
 ```
 
-**Key Implementation Details:**
-- **C UDF (Line 269):** Uses `amp_id % ip_count` to deterministically select the target worker
-- **Trino Split Manager:** Passes all distinct worker IPs to Teradata as a comma-separated list
-- **No Duplication Guarantee:** Each AMP processes its own partition of Teradata data and sends it to exactly one worker
+- Routing id: `pid ^ (pid >> 8)` on the AMP; returned to the coordinator so expectations can be recomputed with **unsigned** modulo.
+- Splits are **not** remotely accessible: data locality matches bridge locality.
+- Multi-worker: set `teradata.export.worker-advertised-addresses` to AMP-reachable `host:port` pairs.
 
-### Multi-Worker Architecture Details
+### End-of-stream (summary)
 
-**Split Locality Enforcement:**
-- Each split is assigned to a specific worker via `getAddresses()`
-- `isRemotelyAccessible()` returns `false` to enforce local execution only
-- This ensures data sent to Worker N is processed by Worker N's PageSource
+**Primary:** coordinator broadcasts per-worker **expected** AMP connection counts
+(`EXPECTED_TERADATA_SIGNALS`). Workers complete when received == expected.
 
-**Per-Worker Buffer Registration:**
-- Each worker runs its own `DataBufferRegistry` (static class, but per-JVM)
-- `PageSource` constructor registers the query buffer on that worker
-- Data arriving before `PageSource` is auto-buffered (race condition handling)
+**Not primary:** `JDBC_FINISHED` control messages are ignored (legacy). Short idle
+timeouts are not the design center.
 
-**End-of-Stream Detection:**
-- EOS is detected when all socket connections close or upon receiving a Global EOS signal.
-- **Global EOS (JDBC_FINISHED)**: When the Teradata JDBC execution finishes, the coordinator-side executor broadcasts a "Finished" signal to all workers via the bridge's control channel. This prevents workers that received no data (idle workers) from waiting for the 5-second timeout.
-- Connection tracking ensures all data is in the buffer before a worker signals EOS locally.
+Full write-up: [eos.md](eos.md).
 
-**Hostname-to-IP Resolution:**
-- Teradata C UDF uses `inet_pton()` which requires IP addresses
-- Split Manager resolves worker hostnames to IP addresses automatically
-- For NAT/multi-homed networks, use `worker-advertised-addresses` config
+### Repository code map
 
-**Multi-Worker Deployment Requirements:**
-1. Each Trino worker runs its own Bridge Server instance on the configured port
-2. The `trino-address` config property is only used in single-worker mode
-3. In multi-worker mode, worker IPs are auto-discovered from `NodeManager`
-4. For NAT environments, configure `worker-advertised-addresses` explicitly
+| Path | Content |
+|------|---------|
+| `plugin/trino-teradata/` | Trino plugin (`packaging=trino-plugin`) |
+| `teradata-udf/` | `export_to_trino.c`, LZ4 |
+| `testing/trino-teradata-tests/` | Live-cluster JUnit suite |
+| `config/*.example` | Catalog template |
+| `scripts/` | Build, deploy, UDF register, tests |
 
 ---
 
-## 2. Environment & Credentials
+## 2. Pushdown capabilities
 
-### Connectivity Details
-| Component | Host/IP | Port | Credentials |
-| :--- | :--- | :--- | :--- |
-| **Teradata Database** | `YOUR_TD_HOST` | `1025` | `<admin_user>` / `<password>` |
-| **Trino Coordinator** | `localhost` | `8080` | N/A |
-| **Java Bridge (Listen)**| `0.0.0.0` | `9999` | N/A |
+`TeradataClient` extends Trino `BaseJdbcClient` with Teradata-specific rewrites.
 
-### Key Paths
-- **Trino Server**: `$TRINO_HOME`
-- **JDK Home**: `$JAVA_HOME`
-- **Teradata UDF Source**: `teradata-udf/export_to_trino.c`
-- **Java Connector Source**: `trino-plugin/src/main/java/io/trino/plugin/teradata/export/`
-- **Java Bridge Server**: `TeradataBridgeServer.java` (integrated into Trino Worker JVM)
+| Feature | Behavior |
+|---------|----------|
+| Predicate pushdown | Filters, `IN`, `BETWEEN`, `LIKE`, casts, boolean trees |
+| Aggregation | `COUNT`, `COUNT(DISTINCT)`, `SUM`, `MIN`, `MAX`, `AVG` |
+| Join pushdown | Multi-table joins within Teradata (config toggles) |
+| TopN / LIMIT | Teradata `TOP` / `SAMPLE` style limits |
+| Dynamic filtering | Supported via split source + config timeout |
+| System query PTF | Optional pass-through SQL table function |
 
----
-
-## 3. SQL Generation & Pushdown Capabilities
-
-The connector leverages Trino's modern JDBC infrastructure to provide industry-leading pushdown capabilities.
-
-### 3.1 Enterprise SQL Engine (`TeradataClient`)
-The `TeradataClient` extends Trino's `BaseJdbcClient`, inheriting robust SQL generation for standard relations. It uses a custom `AggregateFunctionRewriter` and `ConnectorExpressionRewriterBuilder`.
-
-- **Predicate Pushdown**: Translates Trino expressions (filters, LIKE, OR, CAST, etc.) into Teradata-compatible SQL. Supported types include numeric, string, date, time, and timestamp.
-- **Join Pushdown**: Pushes down complex multi-way joins, including cross-joins and self-joins.
-- **Aggregate Pushdown**: Supports `COUNT(*)`, `COUNT(DISTINCT col)`, `SUM`, `MIN`, `MAX`, and `AVG` for both decimal and floating-point types.
-- **TopN/Limit Pushdown**: Translates `LIMIT N` or `ORDER BY ... LIMIT N` into Teradata `TOP N` or `SAMPLE N`.
+Disable individual features with `teradata.export.enable-*` properties
+([configuration.md](configuration.md)).
 
 ---
 
-## 4. Metadata Architecture
+## 3. Metadata architecture
 
-Metadata retrieval is optimized for speed, bridging the gap between Trino's optimizer and Teradata's dictionary performance.
-
-### 4.1 Hybrid Metadata Strategy
-1.  **Fast Probing (`WHERE 1=0`)**: The connector uses `SELECT * FROM table WHERE 1=0` to fetch column metadata. This is **25x faster** (1.2s vs 30s+) for large tables compared to standard JDBC `getColumns()`.
-2.  **Case-Insensitive Probing**: Automatically tries multiple casing combinations (Exact, Upper Table, Upper Schema + Table) to match Teradata's object naming.
-3.  **Two-Level Metadata Cache**: 
-    - **Table Cache**: Caches mapping from `SchemaTableName` to `JdbcTableHandle`.
-    - **Column Cache**: Caches column definitions.
-
-### 4.2 Background Metadata Refresh
-The `MetadataRefreshService` periodically warms the caches for critical schemas:
-- **Bulk Schema Discovery**: Lists all databases from `DBC.Databases`.
-- **Bulk Table Caching**: Scans `DBC.TablesV` for configured schemas in a single query.
-- **Intelligent Column Refresh**: Uses bulk `DBC.ColumnsV` queries for physical tables and targeted `WHERE 1=0` probes for views.
+1. **Fast probe** — `SELECT * FROM t WHERE 1=0` for column metadata (avoids slow `DatabaseMetaData.getColumns` on large catalogs).
+2. **Case probing** — exact / upper-table / upper-schema+table combinations for Teradata naming.
+3. **Caches** — table handles and column definitions.
+4. **MetadataRefreshService** — background warm of configured schemas via `DBC.Databases` / `DBC.TablesV` / `DBC.ColumnsV` bulk reads and targeted probes for views.
 
 ---
 
-## 5. Security & Authentication Design
+## 4. Security design
 
-The connector implements a **Hybrid Authentication Model** to balance enterprise security with operational visibility.
+### 4.1 Identity
 
-### 5.1 Authentication Model
-The connector enforces personal identity propagation using Teradata's **Proxy Authentication** mechanism. Unlike standard connectors that might fallback to a service account, this connector ensures that both metadata and data access are strictly governed by the end-user's permissions.
+- Catalog uses a **service account** for JDBC only.
+- Sessions apply `SET QUERY_BAND = 'PROXYUSER=<trino_user>;' FOR SESSION`.
+- With `teradata.export.enforce-proxy-authentication=true`, proxy failure aborts the connection (no silent service-account fallback for data access).
+- Connections reset with `SET QUERY_BAND = NONE FOR SESSION` before pool return.
 
-- **Identity Propagation**: Every JDBC connection is personalized using `SET QUERY_BAND = 'PROXYUSER=<user>;' FOR SESSION;`.
-- **Strict Enforcement**: If proxy authorization fails or is not granted in Teradata, the connection is immediately aborted.
-- **Session Cleanup**: Sessions are reset using `SET QUERY_BAND = NONE FOR SESSION` to prevent identity leakage in connection pools.
-
-### 5.2 Proxy Mechanism Details
-The `TeradataConnectionFactory` is responsible for session initialization:
-- When a data query is triggered, it retrieves the Trino session user.
-- It executes: `SET QUERY_BAND = 'PROXYUSER=<trino_user>;' FOR SESSION;` immediately after connecting.
-- **Strict Enforcement**: If the `SET QUERY_BAND` command fails (e.g., due to missing permissions or invalid user), the connection is **immediately aborted** and an `Access Denied` error is returned to Trino. There is **no fallback** to the service account for data queries.
-- **Reset Protocol**: Sessions are always reset using `SET QUERY_BAND = NONE FOR SESSION` in a `finally` block to prevent identity leakage.
-
-### 5.3 Teradata Security Requirements
-For proxy authentication to work, a Teradata Administrator must grant the following permissions:
+### 4.2 Teradata grants
 
 ```sql
--- Grant connect through rights to the service account
-GRANT CONNECT THROUGH <service_user> TO <trino_user> WITHOUT ROLE;
+GRANT CONNECT THROUGH <service_user> TO PERMANENT <trino_user> WITHOUT ROLE;
 ```
 
-If the user lacks these rights, they will see an error: `[Error 9203] Connect Through has not been granted to <USER> through <SERVICE_USER>`.
+Missing grant typically surfaces as Teradata error **9203**.
+
+### 4.3 Data-plane tokens
+
+Each export query uses a **dynamic security token**. AMP bridge connections must present it. Do not rely on deprecated static catalog tokens.
+
+### 4.4 Network
+
+Restrict worker bridge ports to the Teradata network path only. See [SECURITY.md](../SECURITY.md).
 
 ---
 
-## 6. Implementation Details
+## 5. Implementation notes
 
-### 6.1 C Table Operator (`export_to_trino.c`)
-The UDF is the most critical piece for data integrity.
+### 5.1 C table operator (`teradata-udf/export_to_trino.c`)
 
-- **Signature**: Uses `void ExportToTrino(void)` with explicit `FNC_TblOpOpen` calls. This ensures a stable stream state and prevents "invalid stream state" errors during complex Trino executions.
-- **Binary Codes**: Do not rely on mock headers. Use these confirmed real Teradata internal codes:
-    - `TD_VARCHAR`: 2
-    - `TD_BYTEINT`: 7
-    - `TD_SMALLINT`: 8
-    - `TD_INTEGER`: 9
-    - `TD_FLOAT`: 10
-    - `TD_DECIMAL`: 14
-    - `TD_DATE`: 15
-    - `TD_TIME`: 16
-    - `TD_TIMESTAMP`: 17
-    - `TD_BIGINT`: 36
-- **Temporal Decoding**: 
-    - **TIME**: 6-byte binary. Decoding: `[SecScaled(4)][Hour(1)][Min(1)]`. Seconds are scaled by 1,000,000.
-    - **TIMESTAMP**: 10-byte binary. Decoding: `[SecScaled(4)][Year(2)][Month(1)][Day(1)][Hour(1)][Min(1)]`.
-    - **DATE Support (0001-01-01)**: The C UDF handles pre-1900 dates by correctly processing negative internal offsets. Years before 1900 (where `d < 0`) are handled via logic: `year = (d/10000) + 1900` with adjustment for negative remainders.
-- **Unicode Support**: Character set `UNICODE` (Code 2/6) is stored as UTF-16LE. The UDF contains a manual UTF-16LE to UTF-8 conversion engine. To load test data with multibyte characters (Thai, Chinese), use `bteq -c UTF8`.
-- **Timezone Correction**: Teradata sends TIME/TIMESTAMP as local time strings. The Java connector corrects this using the configured `teradata.timezone` (e.g., `-05:00`). It converts from the Teradata server's timezone to the appropriate local representation.
+- Registered as table operator `ExportToTrino` with contract function auto-discovery.
+- `include/sqltypes_td.h` in-repo is a **local mock** for syntax checks; Teradata compiles against platform headers.
+- Confirmed FNC type codes used by the binary codec include:
 
-### 6.2 Java Connector
-- **`TeradataBridgeServer`**: Integrated server that receives compressed binary data from Teradata AMPs.
-- **`DirectTrinoPageParser`**: Parses binary data directly to Trino `Page` objects.
-- **`TrinoExportSplitManager`**: Orchestrates the process, triggers Teradata SQL execution.
-- **`DataBufferRegistry`**: Thread-safe storage for parsed Pages with deterministic EOS detection.
-- **`TrinoExportPageSource`**: Consumes Pages from the buffer for the Trino engine.
+  | Type | Code |
+  |------|------|
+  | VARCHAR | 2 |
+  | BYTEINT | 7 |
+  | SMALLINT | 8 |
+  | INTEGER | 9 |
+  | FLOAT | 10 |
+  | DECIMAL | 14 |
+  | DATE | 15 |
+  | TIME | 16 |
+  | TIMESTAMP | 17 |
+  | BIGINT | 36 |
 
-## 7. Development, Deployment & Testing
+- **TIME** — 6-byte layout: scaled seconds + hour + minute.
+- **TIMESTAMP** — 10-byte layout including year/month/day/hour/minute + scaled seconds.
+- **DATE** — supports pre-1900 via Teradata internal day offsets.
+- **UNICODE** — UTF-16LE in Teradata → UTF-8 on the wire.
+- **Routing column** — returns mixed PID so Java can compute expected per-worker counts.
 
-### 7.1 Development & Deployment
+### 5.2 Java plugin
 
-**Build and Deploy Connector:**
-Use this to compile the Java code and update the Trino plugin directory.
+| Class | Role |
+|-------|------|
+| `TeradataBridgeServer` | TCP accept, auth, control commands |
+| `DirectTrinoPageParser` | Binary → `Page` |
+| `DataBufferRegistry` | Queues + deterministic EOS |
+| `TrinoExportDynamicFilteringSplitSource` | UDF execution + expected-count broadcast |
+| `TrinoExportPageSource` | Engine consumer |
+| `MetadataRefreshService` | Cache warming |
+
+Legacy: `TrinoExportFlightServer` may still start for config compatibility; bulk path is the binary bridge.
+
+---
+
+## 6. Build, deploy, test
+
+### 6.1 Build (Trino packaging)
+
 ```bash
-export JAVA_HOME=$JAVA_HOME
-export PATH=$JAVA_HOME/bin:$PATH
-cd src/trino
-mvn clean package dependency:copy-dependencies -DskipTests
-export TRINO_HOME=$TRINO_HOME
-/bin/bash ../../scripts/deploy_to_trino.sh
+export JAVA_HOME=/path/to/jdk-25
+./mvnw -pl plugin/trino-teradata -am clean package
+# or
+./scripts/build.sh
 ```
 
-**Full Cycle (Build + Deploy + JDBC + Restart):**
-The most frequently used command during development.
-```bash
-export JAVA_HOME=$JAVA_HOME && \
-export PATH=$JAVA_HOME/bin:$PATH && \
-cd src/trino && mvn clean package dependency:copy-dependencies -DskipTests && \
-export TRINO_HOME=$TRINO_HOME && \
-/bin/bash ../../scripts/deploy_to_trino.sh && \
-cp $TERADATA_JDBC_JAR $TRINO_HOME/plugin/teradata-export/ && \
-$TRINO_HOME/bin/launcher restart --etc-dir=$TRINO_HOME/etc
+Output:
+
+```text
+plugin/trino-teradata/target/trino-teradata-479-1-SNAPSHOT/
+plugin/trino-teradata/target/trino-teradata-479-1-SNAPSHOT.zip
 ```
 
-**Restart Trino Server Only:**
+SPI jars are **not** bundled (`provided` scope enforced by `trino-maven-plugin`).
+
+### 6.2 Deploy
+
 ```bash
-$TRINO_HOME/bin/launcher restart \
-  --etc-dir=$TRINO_HOME/etc
+export TRINO_HOME=/path/to/trino
+export TERADATA_JDBC_JAR=/path/to/terajdbc4.jar
+./scripts/deploy.sh
+# multi-node lab:
+# export TRINO_WORKER_1=... && ./scripts/build_deploy_restart.sh
 ```
 
-### 7.2 Teradata Side Management
+Catalog: copy `config/teradata-export.properties.example` →
+`$TRINO_HOME/etc/catalog/tdexport.properties` and edit.
 
-**Register/Reload UDF:**
+### 6.3 UDF registration
+
 ```bash
-export TD_HOME=/opt/teradata/client/20.00
-export PATH=$PATH:$TD_HOME/bin
-bteq < scripts/register.bteq
+export TD_HOST=... TD_LOGON_USER=... TD_LOGON_PASSWORD=...
+export UDF_SRC_DIR="$(pwd)/teradata-udf"   # must be TD-readable
+./scripts/register_udf.sh
+RUN_BTEQ=1 ./scripts/register_udf.sh
 ```
 
-**Manual UDF Test (Via BTEQ):**
-Useful for isolating UDF issues from Trino.
+### 6.4 Integration tests
+
+Requires a live Trino + Teradata environment:
+
 ```bash
-bteq <<EOF
-.LOGON YOUR_TD_HOST/<admin_user>,<password>
-DATABASE TrinoExport;
-SELECT * FROM ExportToTrino(
-  ON (SELECT TOP 1 * FROM DBC.Tables)
-  ON (SELECT 'YOUR_TRINO_HOST:9999' as target_ips, 'manual-test' as qid) DIMENSION
-) AS t;
-.QUIT
-EOF
+cp dev/env.example dev/local.env   # gitignored; set lab paths
+./scripts/run_tests.sh             # full suite (~230 tests)
+./scripts/run_tests.sh BasicConnectivityTest
 ```
 
-### 7.3 Monitoring Bridge Activity
+Maven (ITs off by default):
 
-**Watch Bridge Activity via Server Logs:**
 ```bash
-tail -f $TRINO_HOME/data/var/log/server.log | grep -E "(Bridge|Receiving|processed query)"
+./mvnw -pl testing/trino-teradata-tests -am test -DskipITs=false
 ```
 
-### 7.4 Verification & Testing
+Seed data scripts (parameterize logon before use): `testing/setup_*.bteq`.
 
-#### 7.4.1 Quick Query Test
-For rapid validation of specific fixes (like TIME decoding or Decimal precision), use `quick_test.sh`. It automatically filters out `jline` terminal noise and compares results.
-
-```bash
-# General query
-./tests/quick_test.sh "SELECT current_timestamp"
-
-# Query with expected result comparison
-./tests/quick_test.sh "SELECT test_id FROM test_unicode WHERE test_id = 1" "1"
-```
-
-#### 7.4.2 Full Integration Suite
-The comprehensive suite `run_connector_tests.sh` validates 90+ scenarios across all data types, JOINs, aggregations, and pushdown optimizations.
+### 6.5 Log markers
 
 ```bash
-# Execute full suite
-bash tests/run_connector_tests.sh
-```
-
-#### 7.4.3 Log-Based Pushdown Verification
-To ensure that filters and limits are truly executed by Teradata, verify the generated SQL in the server log.
-
-```bash
-# Manual check for generated SQL in server.log
-grep "Executing Teradata SQL" $TRINO_HOME/data/var/log/server.log | tail -n 5
-
-# Validation of Pushdown logic (TopN/Limit)
-grep -E "Applied (TopN|LIMIT) pushdown" $TRINO_HOME/data/var/log/server.log | tail -n 5
-```
-
-#### 7.4.4 Modular Java Test Suite (Recommended)
-For deep, modular, and faster validation, a Java-based test suite using JUnit 5 and the Trino JDBC driver is available. This suite allows running specific test categories or individual cases.
-
-**Advantages:**
-- **Speed**: Persistent JDBC connections and optimized query execution.
-- **Modularity**: Tests are grouped by type (Numeric, Char, DateTime, Complex, etc.).
-- **Granular Execution**: Can run a single test class or even a single test method.
-- **Rich Reporting**: Detailed diffs on failure via AssertJ.
-
-**Prerequisites:**
-- Trino JDBC driver in `trino-jdbc (Maven: io.trino:trino-jdbc)`
-- JDK 21+ and Maven.
-
-**Running the Java Suite:**
-```bash
-# Run all 90+ validations
-/bin/bash tests/run_java_suite.sh
-
-# Run specific functional group (e.g., Numeric types only)
-/bin/bash tests/run_java_suite.sh NumericDataTypeTest
-
-# Run a specific test method within a class
-/bin/bash tests/run_java_suite.sh LogValidationTest#test15_6
-```
-
-### 7.5 Test Suite Architecture (Integrity Checking)
-The test suite was developed using a modular bash framework to ensure reliable connection and data integrity checking.
-
-- **`setup_test_tables.bteq`**: A pre-requisite script that populates Teradata with edge-case data (multibyte Unicode, 0001-01-01 dates, high-precision decimals).
-  ```bash
-  export TD_HOME=/opt/teradata/client/20.00
-  bteq -c UTF8 < tests/setup_test_tables.bteq
-  ```
-- **Helper Functions**:
-  - `run_count_test`: Validates that the number of rows transferred matches Teradata expectation.
-  - `run_value_test`: Performs deep value comparison for specific columns, critical for data type decoding validation.
-- **Log Markers**: Uses timestamp markers or `tail` offsets to isolate the effects of the *current* query within the shared `server.log`, preventing false positives from previous executions.
-
-### 7.6 Monitoring & Logs
-
-**Watch Trino Server Logs:**
-```bash
-tail -f $TRINO_HOME/data/var/log/server.log
-```
-
-**Search for Teradata Execution SQL in Logs:**
-```bash
-grep "Executing Teradata SQL" $TRINO_HOME/data/var/log/server.log
-```
-
-### Verify System Data (Unicode/DBC)
-```bash
--- Use this to verify UTF-16 to UTF-8 conversion
-SELECT DatabaseName, CommentString FROM tdexport.dbc.databases LIMIT 5;
+grep "Executing Teradata SQL" $TRINO_HOME/data/var/log/server.log | tail
+grep "DETERMINISTIC EOS" $TRINO_HOME/data/var/log/server.log | tail
 ```
 
 ---
 
+## 7. Troubleshooting
 
-## 8. Troubleshooting Common Issues
-
-1.  **"Invalid Stream State" (Error 7813)**: 
-    - **Cause**: Teradata Table Operator was likely registered with parameters in the signature or used an old stream opening pattern.
-    - **Fix**: Re-register `ExportToTrino()` using the void signature and explicit `FNC_TblOpOpen(0, 'r', 0)` calls.
-
-2.  **"Failed to convert value ... to type time(6)"**:
-    - **Cause**: Binary structure of TIME was misunderstood (likely treated as a double).
-    - **Fix**: Use the 6-byte binary decoding logic: `[SecScaled][Hour][Min]`.
-
-3.  **Non-readable/Hex junk in strings**:
-    - **Cause**: Character Set UNICODE (UTF-16) was sent directly to Trino (UTF-8).
-    - **Fix**: The C UDF must perform UTF-16 to UTF-8 conversion before sending.
-
-4.  **No data in Trino / Query hangs**:
-    - **Cause**: Bridge is not running or firewall/IP mismatch. 
-    - **Check**: `tail -f bridge_restarted.log` and verify the `TargetIPs` used in the UDF call (sent by Trino `SplitManager`).
+| Symptom | Likely cause | Action |
+|---------|--------------|--------|
+| Query hangs, no rows | Expected EOS counts wrong; AMPs cannot reach bridge | Fix `worker-advertised-addresses`; check unsigned PID routing; firewall |
+| Empty result but TD has data | Type schema / codec mismatch | Confirm UDF registration from current sources; check type codes |
+| Access denied / 9203 | Missing `CONNECT THROUGH` | Grant to permanent user |
+| Invalid stream state (7813) | Bad table-operator registration | Re-run `register_udf.sh` with void signature sources |
+| Garbled strings | UNICODE without UTF-8 conversion | Ensure current UDF (UTF-16LE→UTF-8) is installed |
+| TIME conversion errors | Wrong binary layout | Use 6-byte TIME decode in current parser/UDF pair |
+| Plugin fails to load | Trino version ≠ 479; missing JDBC jar | Align SPI version; add `terajdbc4.jar` to plugin dir |
 
 ---
 
----
+## 8. Limitations (honest)
 
-## 9. Catalog Configuration (`tdexport.properties`)
-
-The connector is highly configurable. Below is a comprehensive reference of all configuration properties.
-
-### 9.1 Core Connection Settings
-
-```properties
-connector.name=teradata-export
-teradata.url=jdbc:teradata://YOUR_TD_HOST/DATABASE=TrinoExport
-teradata.user=YOUR_SERVICE_USER
-teradata.password=YOUR_PASSWORD
-
-# Teradata server timezone offset (for TIME/TIMESTAMP conversion)
-# Format: +/-HH:MM (e.g., -05:00 for EST, +08:00 for SGT)
-teradata.timezone=-05:00
-```
-
-### 9.2 Performance & Scalability Settings
-
-```properties
-# Parallel splits per worker (default: 8)
-teradata.export.splits-per-worker=8
-
-# Batch size for UDF-to-Java transfer (rows per batch)
-teradata.export.batch-size=500000
-
-# TCP socket receive buffer size (default: 128MB)
-teradata.export.socket-receive-buffer-size=134217728
-
-# Maximum number of Pages buffered per split (default: 500)
-teradata.export.buffer-queue-capacity=500
-
-# Number of bridge handler threads (default: 100)
-teradata.export.max-bridge-threads=100
-```
-
-### 9.3 Optimization Toggles (Pushdowns)
-
-```properties
-teradata.export.enable-aggregation-pushdown=true
-teradata.export.enable-join-pushdown=true
-teradata.export.enable-topn-pushdown=true
-teradata.export.enable-complex-join-pushdown=true
-teradata.export.enable-complex-expression-pushdown=true
-```
-
-### 9.4 Metadata & Refresh Settings
-
-```properties
-# Max entries in metadata cache (default: 1000)
-teradata.export.metadata-cache-size=1000
-
-# Background refresh frequency (e.g., 30m, 1h)
-teradata.export.metadata-refresh-interval=30m
-
-# Schemas to keep warm in cache (comma-separated)
-teradata.export.metadata-refresh-schemas=DBC,TrinoExport
-
-# Whether to refresh column details (default: true)
-teradata.export.metadata-refresh-columns=true
-```
+- Optimized for **SELECT** / analytics extract, not general-purpose writes to Teradata.
+- Trino version compatibility is **pinned** to the SPI version in the POM (479 today).
+- Requires installing a UDF on Teradata and opening AMP→worker network paths.
+- Not an official Trino Software Foundation or Teradata product.
 
 ---
 
-## 10. Configuration Properties Reference
+## 9. Version history (docs)
 
-| Property | Default | Description |
-|:---------|:--------|:------------|
-| `teradata.url` | *required* | JDBC URL for Teradata |
-| `teradata.user` | *required* | Service or Proxy account username |
-| `teradata.password` | *required* | Account password |
-| `teradata.timezone` | `-05:00` | Teradata server timezone offset |
-| `teradata.export.bridge-port` | `9999` | Data bridge listener port |
-| `teradata.export.trino-address` | *required* | Trino address for single-node mode |
-| `teradata.export.splits-per-worker` | `8` | Parallel splits per worker |
-| `teradata.export.batch-size` | `500000` | Rows per binary batch |
-| `teradata.export.socket-receive-buffer-size`| `134217728`| OS socket buffer (bytes) |
-| `teradata.export.compression-algorithm` | `ZLIB` | `ZLIB` or `LZ4` |
-| `teradata.export.enable-join-pushdown` | `true` | Enable join pushdown |
-| `teradata.export.enable-aggregation-pushdown`| `true` | Enable COUNT/SUM/AVG pushdown |
-| `teradata.export.metadata-refresh-interval` | `0` | Background refresh frequency |
-| `teradata.export.metadata-cache-size` | `1000` | Max entries in planner cache |
-| `teradata.export.enforce-proxy-authentication`| `true` | Fail early if proxy fails |
-| `teradata.export.broadcast-socket-timeout-ms` | `5000` | Timeout for EOS broadcast |
-| `teradata.export.domain-compaction-threshold` | `100` | Threshold for predicate compaction |
+| Date | Notes |
+|------|--------|
+| 2026-07 | Open-source layout: `plugin/trino-teradata`, `trino-plugin` packaging, deterministic EOS documented as primary; lab credentials removed |
 
----
-
-## 11. Performance & Architectural Optimizations
-
-The Teradata Export Connector is engineered for massive parallel throughput with **100% data reliability**. Its performance is achieved through advanced architectural design patterns.
-
-### 11.1 Synchronous Processing (Data Integrity First)
-The connector uses a **fully synchronous data pipeline** to guarantee data integrity:
-
-```
-Socket Thread: receive → decompress → parse to Page → push to buffer → next batch
-                        ↓
-           Only AFTER all data is in buffer:
-                        ↓  
-           Connection decremented → EOS signaled
-```
-
-**Key Guarantee**: Data is ALWAYS in the buffer before connection count decrements. This eliminates race conditions where EOS could be signaled prematurely.
-
-### 11.2 DirectTrinoPageParser
-The connector parses data directly for maximum performance:
-- **Direct Binary-to-Page**: Teradata's packed binary format is parsed directly into Trino `Page` objects.
-- **No Intermediate Format**: Eliminates allocation and conversion overhead.
-- **Timezone Correction**: TIME/TIMESTAMP values are adjusted from Teradata's timezone to UTC during parsing.
-
-### 11.3 High-Performance Compression
-To reduce network bandwidth and CPU overhead:
-- **Teradata C UDF**: Compresses binary batches using either **ZLIB** (high ratio) or **LZ4** (high throughput).
-- **Java Bridge**: Synchronously decompresses batches using `java.util.zip.Inflater` (for ZLIB) or native LZ4 libraries.
-- **Adaptive Selection**: Users can choose the algorithm via `teradata.export.compression-algorithm` or session properties.
-- **Typical Ratio**: 3-10x compression for typical structured data.
-
-### 11.4 Massively Parallel Data Routing
-The connector leverages the full parallelism of the Teradata cluster:
-- **AMP-Level Parallelism**: Every Teradata AMP establishes its own socket connection to a Trino worker.
-- **Deterministic Load Balancing**: Using `amp_id % worker_count`, data is distributed evenly.
-- **Locality Awareness**: Splits are configured with `isRemotelyAccessible = false` for local execution.
-
-### 11.5 Robust EOS Detection
-
-The connector implements a **deterministic End-of-Stream** protocol:
-
-1. **Synchronous Guarantee**: Data pushed to buffer BEFORE connection decrements
-2. **Connection Tracking**: Atomic counter tracks active AMP connections
-3. **JDBC Completion Signal**: Coordinator broadcasts when Teradata SQL finishes
-4. **Minimal Stabilization**: 100ms wait only for socket accept race conditions
-5. **No Arbitrary Timeouts**: EOS based on actual completion, not guessing
-
-**Edge Case Handling**: If no connections arrive within 5 seconds after JDBC finishes, the query is assumed to return empty results.
-
----
-
----
-
-*Updated on 2026-01-01 - Modernized architecture with full JDBC pushdown and background metadata refresh*
+*Earlier internal revisions described JDBC_FINISHED-first and lab-only paths; those sections are obsolete.*

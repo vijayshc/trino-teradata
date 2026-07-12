@@ -4,21 +4,34 @@ Thanks for improving the Trino Teradata Direct connector.
 
 ## Standards
 
-This project follows Trino plugin conventions described in:
+Follow:
 
-- https://trino.io/docs/current/develop/spi-overview.html
-- https://github.com/trinodb/trino/blob/master/.github/DEVELOPMENT.md
-- [docs/development.md](docs/development.md) (project-specific)
+- https://trino.io/docs/current/develop/spi-overview.html  
+- https://github.com/trinodb/trino/blob/master/.github/DEVELOPMENT.md  
+- [docs/development.md](docs/development.md)  
+- [docs/architecture.md](docs/architecture.md)  
 
-Key requirements:
+### Requirements
 
 1. Use `./mvnw` (Maven 3.9+) and **JDK 25+**
-2. Keep `packaging` as `trino-plugin` for the connector module
-3. Never package `trino-spi` (must stay `provided`)
-4. Apache-2.0 license headers on Java sources (template: `license-header.txt`)
-5. No `System.out` / `printStackTrace` — use Airlift `Logger`
+2. Keep connector packaging as `trino-plugin`
+3. Never package `trino-spi` (must remain `provided`)
+4. Apache-2.0 headers on Java sources (`license-header.txt`)
+5. No `System.out` / `printStackTrace` — Airlift `Logger` only
 6. Prefer Guava immutables and AssertJ
-7. Do not commit secrets, TTU media, or `terajdbc4.jar`
+7. Do not commit secrets, TTU media, `terajdbc4.jar`, or lab `dev/local.env`
+8. Do not change EOS to timeout-first without an architecture discussion
+
+### Documentation
+
+If you change behavior, update the relevant docs in the same PR:
+
+| Change area | Update |
+|-------------|--------|
+| Routing / EOS | `docs/eos.md`, `docs/architecture.md` |
+| Config properties | `docs/configuration.md`, `config/*.example` |
+| Install / packaging | `docs/installation.md`, `README.md` |
+| SPI / build | `docs/development.md` |
 
 ## Workflow
 

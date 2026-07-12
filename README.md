@@ -2,118 +2,124 @@
 
 **Apache License 2.0** · Unofficial community plugin
 
-A high-performance Trino connector for Teradata that uses a **parallel binary data path**
-(Teradata table operator → TCP bridge on Trino workers → direct Trino `Page` parsing).
+High-performance **read** connector for [Trino](https://trino.io) that extracts data from
+Teradata using a **parallel binary path** (table operator on AMPs → TCP bridge on Trino
+workers → direct `Page` parsing), as an open alternative to commercial Direct-style
+connectors.
 
 > Not affiliated with the Trino Software Foundation, Teradata Corporation, or Starburst Data.
 
-This repository is structured as a **standalone Trino plugin** following the
-[SPI / `trino-plugin` packaging conventions](https://trino.io/docs/current/develop/spi-overview.html).
+Packaging follows Trino’s
+[`trino-plugin` SPI conventions](https://trino.io/docs/current/develop/spi-overview.html).
+
+## Why this exists
+
+Generic JDBC extract is row-at-a-time and coordinator-heavy. This connector:
+
+1. Pushes computation to Teradata (predicates, aggs, joins, TopN).
+2. Streams result rows **in parallel from AMPs** to Trino workers.
+3. Completes splits with **deterministic end-of-stream** (expected AMP counts per worker),
+   not timeout-first signaling.
 
 ## Features
 
-- **Direct binary protocol** — AMP-parallel extract over TCP
-- **Embedded bridge server** on each Trino worker
-- **Pushdown** — predicates, aggregations, joins, TopN/LIMIT, dynamic filtering
-- **Identity propagation** — Teradata `PROXYUSER` via `QUERY_BAND`
-- **Per-query security tokens** on the data plane
-- **LZ4 / ZLIB compression**
+- Direct binary protocol (LZ4 / ZLIB compressed batches)
+- Embedded bridge server on every Trino worker
+- Predicate, aggregation, join, TopN, and dynamic-filter pushdown
+- Teradata `PROXYUSER` identity propagation
+- Per-query data-plane security tokens
+- Background metadata cache refresh
 
 ## Requirements
 
 | Component | Notes |
 |-----------|--------|
-| **JDK 25+** | Trino 479 SPI bytecode |
-| **Maven 3.9.1+** | Use `./mvnw` (bundled) |
-| Trino **479** | Pinned as `dep.trino.version` |
-| Teradata | Table-operator UDF support |
-| `terajdbc4.jar` | **Bring your own** (not redistributed) |
+| **JDK 25+** | Build against Trino 479 SPI |
+| **Maven 3.9.1+** | Bundled as `./mvnw` |
+| **Trino 479** | Pinned via `dep.trino.version` |
+| Teradata | Table-operator UDF support; AMP→worker TCP |
+| `terajdbc4.jar` | **Bring your own** (not in this repo) |
 
 ## Repository layout
 
-Aligned with the Trino monorepo plugin layout:
-
 ```text
-plugin/trino-teradata/           # packaging: trino-plugin
-testing/trino-teradata-tests/    # live-cluster integration suite
-teradata-udf/                    # ExportToTrino C table operator
-docs/                            # architecture + development standards
-config/*.example
-scripts/
+plugin/trino-teradata/            # Trino plugin (packaging: trino-plugin)
+teradata-udf/                     # ExportToTrino C table operator + LZ4
+testing/trino-teradata-tests/     # Live-cluster integration tests
+config/*.example                  # Catalog template (no secrets)
+scripts/                          # build / deploy / UDF / tests
+docs/                             # architecture, install, EOS, config
 ```
 
-See [docs/development.md](docs/development.md) for SPI rules and coding standards.
-
-## Build
+## Quick start
 
 ```bash
+# Build
 export JAVA_HOME=/path/to/jdk-25
-./mvnw clean verify                 # unit tests; ITs skipped by default
-# or
-./scripts/build.sh
-```
+./mvnw -pl plugin/trino-teradata -am clean package
 
-Produces the official-style plugin package:
-
-```text
-plugin/trino-teradata/target/trino-teradata-479-1-SNAPSHOT/
-plugin/trino-teradata/target/trino-teradata-479-1-SNAPSHOT.zip
-```
-
-## Install
-
-```bash
+# Deploy (every Trino node)
 export TRINO_HOME=/path/to/trino-server
 export TERADATA_JDBC_JAR=/path/to/terajdbc4.jar
 ./scripts/deploy.sh
-```
 
-Catalog properties:
-
-```bash
+# Catalog
 cp config/teradata-export.properties.example \
    $TRINO_HOME/etc/catalog/tdexport.properties
-# edit credentials / bridge addresses, then restart Trino
-```
+# edit host, credentials, worker-advertised-addresses → restart Trino
 
-`connector.name` must be `teradata_export`.
-
-## Register the Teradata UDF
-
-```bash
+# UDF on Teradata
 export TD_HOST=... TD_LOGON_USER=... TD_LOGON_PASSWORD=...
-export UDF_SRC_DIR="$(pwd)/teradata-udf"
-./scripts/register_udf.sh
-RUN_BTEQ=1 ./scripts/register_udf.sh
+export UDF_SRC_DIR="$(pwd)/teradata-udf"   # path must be readable by TD
+./scripts/register_udf.sh && RUN_BTEQ=1 ./scripts/register_udf.sh
 ```
 
 ```sql
-GRANT CONNECT THROUGH <service_user> TO PERMANENT <end_user> WITHOUT ROLE;
+GRANT CONNECT THROUGH <service_user> TO PERMANENT <trino_user> WITHOUT ROLE;
+
+SHOW SCHEMAS FROM tdexport;
+SELECT COUNT(*) FROM tdexport.<schema>.<table>;
 ```
 
-## Integration tests
-
-```bash
-cp dev/env.example dev/local.env   # lab paths (gitignored)
-./scripts/build_deploy_restart.sh
-./scripts/run_tests.sh
-```
+`connector.name` must be **`teradata_export`**.
 
 ## Documentation
 
-| Doc | Content |
-|-----|---------|
-| [docs/development.md](docs/development.md) | SPI packaging, standards, build |
-| [docs/TECHNICAL_GUIDE_TDEXPORT.md](docs/TECHNICAL_GUIDE_TDEXPORT.md) | Architecture & ops |
-| [SECURITY.md](SECURITY.md) | Threat model & reporting |
-| [CONTRIBUTING.md](CONTRIBUTING.md) | Contribution workflow |
+| Document | Contents |
+|----------|----------|
+| [docs/architecture.md](docs/architecture.md) | Control/data plane, routing, security model |
+| [docs/eos.md](docs/eos.md) | Deterministic EOS design |
+| [docs/installation.md](docs/installation.md) | Build, install, UDF, network |
+| [docs/configuration.md](docs/configuration.md) | Catalog property reference |
+| [docs/TECHNICAL_GUIDE_TDEXPORT.md](docs/TECHNICAL_GUIDE_TDEXPORT.md) | Full technical guide |
+| [docs/development.md](docs/development.md) | SPI packaging & contributor standards |
+| [SECURITY.md](SECURITY.md) | Hardening & vulnerability reporting |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | How to contribute |
+
+## Development & tests
+
+```bash
+./mvnw clean verify                          # unit tests; ITs skipped
+cp dev/env.example dev/local.env             # gitignored lab overrides
+./scripts/build_deploy_restart.sh            # optional multi-node lab
+./scripts/run_tests.sh                       # full integration suite
+```
+
+See [docs/development.md](docs/development.md).
+
+## Compatibility
+
+Full compatibility is only guaranteed when the plugin is built for the **same**
+Trino version it is deployed to (`dep.trino.version` in the root `pom.xml`).
+See the [Trino SPI compatibility notes](https://trino.io/docs/current/develop/spi-overview.html#compatibility).
 
 ## License
 
 Licensed under the [Apache License, Version 2.0](LICENSE).
 
-LZ4 under `teradata-udf/` is BSD 2-Clause. Teradata JDBC is proprietary and not included.
+- LZ4 sources under `teradata-udf/` are **BSD 2-Clause**
+- Teradata JDBC is proprietary and **must not** be redistributed with this project
 
-## Trademark notice
+## Trademarks
 
 Trino®, Teradata®, and Starburst® are trademarks of their respective owners.
