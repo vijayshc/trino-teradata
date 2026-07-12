@@ -11,4 +11,14 @@ if [[ -f "$PROJECT_DIR/dev/local.env" ]]; then
 fi
 
 export PLUGIN_NAME="${PLUGIN_NAME:-teradata-export}"
-export PLUGIN_ARTIFACT="${PLUGIN_ARTIFACT:-trino-teradata-export-0.1.0-SNAPSHOT.jar}"
+# Trino-standard plugin artifact layout from packaging=trino-plugin
+export PLUGIN_MODULE="${PLUGIN_MODULE:-plugin/trino-teradata}"
+export PLUGIN_ARTIFACT_ID="${PLUGIN_ARTIFACT_ID:-trino-teradata}"
+export PROJECT_VERSION="${PROJECT_VERSION:-479-1-SNAPSHOT}"
+
+# Prefer ./mvnw when present (Maven 3.9+ required by trino-maven-plugin)
+if [[ -x "$PROJECT_DIR/mvnw" ]]; then
+  export MVN="${MVN:-$PROJECT_DIR/mvnw}"
+else
+  export MVN="${MVN:-mvn}"
+fi

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Deploy the plugin into one or more Trino installations.
+# Deploy the trino-plugin packaging output into one or more Trino installations.
 #
 # Required:
 #   TRINO_HOME              path to Trino server (coordinator)
@@ -19,13 +19,12 @@ if [[ -z "${TRINO_HOME:-}" ]]; then
 fi
 if [[ -z "${TERADATA_JDBC_JAR:-}" || ! -f "${TERADATA_JDBC_JAR}" ]]; then
   echo "ERROR: TERADATA_JDBC_JAR must point to terajdbc4.jar" >&2
-  echo "  export TERADATA_JDBC_JAR=/path/to/terajdbc4.jar" >&2
   exit 1
 fi
 
-JAR="$PROJECT_DIR/trino-plugin/target/$PLUGIN_ARTIFACT"
-if [[ ! -f "$JAR" ]]; then
-  echo "Plugin JAR not found; building first..."
+PLUGIN_SRC="$PROJECT_DIR/$PLUGIN_MODULE/target/${PLUGIN_ARTIFACT_ID}-${PROJECT_VERSION}"
+if [[ ! -d "$PLUGIN_SRC" ]]; then
+  echo "Plugin package not found; building first..."
   "$SCRIPT_DIR/build.sh"
 fi
 
@@ -35,12 +34,9 @@ deploy_one() {
   local plugin_dir="$root/plugin/$PLUGIN_NAME"
   echo "Deploying to $label -> $plugin_dir"
   mkdir -p "$plugin_dir"
-  # Replace plugin contents for a clean install
+  # Clean previous install (avoid stale deps)
   find "$plugin_dir" -maxdepth 1 -type f -name '*.jar' -delete 2>/dev/null || true
-  cp "$JAR" "$plugin_dir/"
-  if [[ -d "$PROJECT_DIR/trino-plugin/target/dependency" ]]; then
-    cp "$PROJECT_DIR/trino-plugin/target/dependency/"*.jar "$plugin_dir/" 2>/dev/null || true
-  fi
+  cp "$PLUGIN_SRC/"*.jar "$plugin_dir/"
   cp "$TERADATA_JDBC_JAR" "$plugin_dir/terajdbc4.jar"
   echo "  JARs installed: $(ls -1 "$plugin_dir"/*.jar 2>/dev/null | wc -l)"
 }

@@ -1,16 +1,18 @@
 # Trino Teradata Direct Connector
 
-**Apache License 2.0** · Unofficial community project
+**Apache License 2.0** · Unofficial community plugin
 
 A high-performance Trino connector for Teradata that uses a **parallel binary data path**
-(Teradata table operator → TCP bridge on Trino workers → direct Trino `Page` parsing),
-as an open alternative to commercial “Direct” style connectors.
+(Teradata table operator → TCP bridge on Trino workers → direct Trino `Page` parsing).
 
 > Not affiliated with the Trino Software Foundation, Teradata Corporation, or Starburst Data.
 
+This repository is structured as a **standalone Trino plugin** following the
+[SPI / `trino-plugin` packaging conventions](https://trino.io/docs/current/develop/spi-overview.html).
+
 ## Features
 
-- **Direct binary protocol** — AMP-parallel extract over TCP (not row-at-a-time JDBC fetch)
+- **Direct binary protocol** — AMP-parallel extract over TCP
 - **Embedded bridge server** on each Trino worker
 - **Pushdown** — predicates, aggregations, joins, TopN/LIMIT, dynamic filtering
 - **Identity propagation** — Teradata `PROXYUSER` via `QUERY_BAND`
@@ -21,126 +23,96 @@ as an open alternative to commercial “Direct” style connectors.
 
 | Component | Notes |
 |-----------|--------|
-| JDK 21+ | Build and runtime |
-| Maven 3.8+ | Build |
-| Trino 479 | Tested version (`trino.version` in root `pom.xml`) |
-| Teradata | With table-operator UDF support |
-| Teradata JDBC (`terajdbc4.jar`) | **Bring your own** (not redistributed) |
-| Network | Teradata AMPs must reach worker bridge ports |
+| **JDK 25+** | Trino 479 SPI bytecode |
+| **Maven 3.9.1+** | Use `./mvnw` (bundled) |
+| Trino **479** | Pinned as `dep.trino.version` |
+| Teradata | Table-operator UDF support |
+| `terajdbc4.jar` | **Bring your own** (not redistributed) |
 
 ## Repository layout
 
+Aligned with the Trino monorepo plugin layout:
+
 ```text
-trino-teradata-direct/
-├── trino-plugin/          # Trino connector (Java)
-├── teradata-udf/          # ExportToTrino table operator (C + LZ4)
-├── testing/trino-tests/   # Integration suite (live cluster)
-├── config/                # Catalog property examples
-├── scripts/               # Build, deploy, UDF register, tests
-├── docs/                  # Architecture and ops guides
-└── dev/                   # env.example (local.env is gitignored)
+plugin/trino-teradata/           # packaging: trino-plugin
+testing/trino-teradata-tests/    # live-cluster integration suite
+teradata-udf/                    # ExportToTrino C table operator
+docs/                            # architecture + development standards
+config/*.example
+scripts/
 ```
 
-## Quick start
+See [docs/development.md](docs/development.md) for SPI rules and coding standards.
 
-### 1. Build the plugin
+## Build
 
 ```bash
+export JAVA_HOME=/path/to/jdk-25
+./mvnw clean verify                 # unit tests; ITs skipped by default
+# or
 ./scripts/build.sh
-# or: mvn -pl trino-plugin -am clean package -DskipTests
 ```
 
-### 2. Deploy into Trino
+Produces the official-style plugin package:
+
+```text
+plugin/trino-teradata/target/trino-teradata-479-1-SNAPSHOT/
+plugin/trino-teradata/target/trino-teradata-479-1-SNAPSHOT.zip
+```
+
+## Install
 
 ```bash
 export TRINO_HOME=/path/to/trino-server
 export TERADATA_JDBC_JAR=/path/to/terajdbc4.jar
-# optional multi-node:
-# export TRINO_WORKER_1=/path/to/trino-worker-1
-
 ./scripts/deploy.sh
 ```
 
-Install catalog config:
+Catalog properties:
 
 ```bash
 cp config/teradata-export.properties.example \
    $TRINO_HOME/etc/catalog/tdexport.properties
-# edit credentials, bridge addresses, UDF database, then restart Trino
+# edit credentials / bridge addresses, then restart Trino
 ```
 
-### 3. Register the Teradata UDF
+`connector.name` must be `teradata_export`.
+
+## Register the Teradata UDF
 
 ```bash
-export TD_HOST=your-td-host
-export TD_LOGON_USER=dbc          # or a privileged admin
-export TD_LOGON_PASSWORD=...
-export TD_UDF_DATABASE=TrinoExport
-# UDF sources must be readable by the Teradata node(s):
-# export UDF_SRC_DIR=/path/on/td/share/teradata-udf
-
+export TD_HOST=... TD_LOGON_USER=... TD_LOGON_PASSWORD=...
+export UDF_SRC_DIR="$(pwd)/teradata-udf"
 ./scripts/register_udf.sh
 RUN_BTEQ=1 ./scripts/register_udf.sh
 ```
-
-Grant connect-through for identity propagation:
 
 ```sql
 GRANT CONNECT THROUGH <service_user> TO PERMANENT <end_user> WITHOUT ROLE;
 ```
 
-### 4. Query
-
-```sql
-SHOW SCHEMAS FROM tdexport;
-SELECT COUNT(*) FROM tdexport.mydb.mytable;
-```
-
-## Lab verification (developers)
-
-Copy and edit local overrides (never commit secrets):
+## Integration tests
 
 ```bash
-cp dev/env.example dev/local.env
-# or use your private lab file
-
+cp dev/env.example dev/local.env   # lab paths (gitignored)
 ./scripts/build_deploy_restart.sh
 ./scripts/run_tests.sh
 ```
 
-Integration tests are **skipped** on plain `mvn package`. Enable with:
+## Documentation
 
-```bash
-mvn -pl testing/trino-tests -am test -DskipITs=false
-```
-
-## Configuration reference
-
-See `config/teradata-export.properties.example` and [docs/TECHNICAL_GUIDE_TDEXPORT.md](docs/TECHNICAL_GUIDE_TDEXPORT.md).
-
-Key properties:
-
-| Property | Purpose |
-|----------|---------|
-| `teradata.url` / `user` / `password` | JDBC control plane |
-| `teradata.export.bridge-port` | Binary bridge listen port |
-| `teradata.export.worker-advertised-addresses` | AMP-reachable worker list |
-| `teradata.export.udf-database` | Database hosting `ExportToTrino` |
-| `teradata.export.enforce-proxy-authentication` | Require PROXYUSER |
-
-## Security notes
-
-- The bridge opens a TCP port on workers; restrict network path from Teradata only.
-- Prefer `teradata.password-script` over plaintext passwords in catalog files.
-- Dynamic per-query tokens authenticate AMP connections to the bridge.
-- See [SECURITY.md](SECURITY.md).
+| Doc | Content |
+|-----|---------|
+| [docs/development.md](docs/development.md) | SPI packaging, standards, build |
+| [docs/TECHNICAL_GUIDE_TDEXPORT.md](docs/TECHNICAL_GUIDE_TDEXPORT.md) | Architecture & ops |
+| [SECURITY.md](SECURITY.md) | Threat model & reporting |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Contribution workflow |
 
 ## License
 
 Licensed under the [Apache License, Version 2.0](LICENSE).
 
-LZ4 sources under `teradata-udf/` are BSD 2-Clause (see file headers).
-Teradata JDBC is proprietary and **not** included in this repository.
+LZ4 under `teradata-udf/` is BSD 2-Clause. Teradata JDBC is proprietary and not included.
 
 ## Trademark notice
 

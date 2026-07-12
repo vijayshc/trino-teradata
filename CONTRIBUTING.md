@@ -1,35 +1,37 @@
 # Contributing
 
-Thanks for your interest in improving the Trino Teradata Direct connector.
+Thanks for improving the Trino Teradata Direct connector.
 
-## Development setup
+## Standards
 
-1. JDK 21+, Maven 3.8+
-2. Optional: local Trino 479 cluster and a Teradata instance for integration tests
-3. Copy `dev/env.example` → `dev/local.env` for lab paths (gitignored)
+This project follows Trino plugin conventions described in:
+
+- https://trino.io/docs/current/develop/spi-overview.html
+- https://github.com/trinodb/trino/blob/master/.github/DEVELOPMENT.md
+- [docs/development.md](docs/development.md) (project-specific)
+
+Key requirements:
+
+1. Use `./mvnw` (Maven 3.9+) and **JDK 25+**
+2. Keep `packaging` as `trino-plugin` for the connector module
+3. Never package `trino-spi` (must stay `provided`)
+4. Apache-2.0 license headers on Java sources (`./mvnw license:format`)
+5. No `System.out` / `printStackTrace` — use Airlift `Logger`
+6. Prefer Guava immutables and AssertJ
+7. Do not commit secrets, TTU media, or `terajdbc4.jar`
+
+## Workflow
 
 ```bash
-./scripts/build.sh
+export JAVA_HOME=/path/to/jdk-25
+./mvnw -pl plugin/trino-teradata -am verify
+./mvnw license:check
 ```
 
-## Code guidelines
-
-- Prefer small, focused PRs
-- Do not commit secrets, lab IPs with credentials, TTU media, or Teradata JDBC JARs
-- Keep the data path deterministic (AMP routing + expected EOS); do not switch to timeout-first EOS without design discussion
-- Integration tests belong under `testing/trino-tests` and must honor env/system properties
-
-## Tests
+Integration tests (live cluster):
 
 ```bash
-# Unit / compile only (default)
-mvn -pl trino-plugin -am test
-
-# Full integration suite (live cluster required)
 ./scripts/run_tests.sh
 ```
 
-## License
-
-By contributing, you agree that your contributions are licensed under the
-Apache License 2.0.
+By contributing, you agree that your contributions are licensed under Apache-2.0.

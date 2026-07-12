@@ -1,7 +1,18 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
   Copyright 2025-2026 The trino-teradata-direct contributors
-  SPDX-License-Identifier: Apache-2.0
+
+  Licensed under the Apache License, Version 2.0 (the "License");
+  you may not use this file except in compliance with the License.
+  You may obtain a copy of the License at
+
+      http://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
 -->
 <project xmlns="http://maven.apache.org/POM/4.0.0"
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
@@ -9,38 +20,61 @@
     <modelVersion>4.0.0</modelVersion>
 
     <groupId>io.github.trino-teradata</groupId>
-    <artifactId>trino-teradata-direct</artifactId>
-    <version>0.1.0-SNAPSHOT</version>
+    <artifactId>trino-teradata-direct-root</artifactId>
+    <version>479-1-SNAPSHOT</version>
     <packaging>pom</packaging>
 
-    <name>Trino Teradata Direct Connector</name>
+    <name>${project.artifactId}</name>
     <description>
-        High-performance open-source Trino connector for Teradata using a
-        parallel binary bridge and Teradata table operator (Direct-style path).
+        High-performance open-source Trino connector for Teradata (Direct-style
+        parallel binary bridge + table operator).
     </description>
     <url>https://github.com/vijayshc/trino-teradata-connector</url>
+    <inceptionYear>2025</inceptionYear>
 
     <licenses>
         <license>
-            <name>Apache License, Version 2.0</name>
+            <name>Apache License 2.0</name>
             <url>https://www.apache.org/licenses/LICENSE-2.0.txt</url>
             <distribution>repo</distribution>
         </license>
     </licenses>
 
     <modules>
-        <module>trino-plugin</module>
-        <module>testing/trino-tests</module>
+        <module>plugin/trino-teradata</module>
+        <module>testing/trino-teradata-tests</module>
     </modules>
 
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <maven.compiler.release>21</maven.compiler.release>
-        <trino.version>479</trino.version>
-        <arrow.version>18.3.0</arrow.version>
-        <airlift.version>386</airlift.version>
-        <junit.version>5.10.1</junit.version>
-        <assertj.version>3.24.2</assertj.version>
+        <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+
+        <!--
+          Match the Trino SPI version used for the build.
+          Full compatibility is only guaranteed for this exact Trino release
+          (see https://trino.io/docs/current/develop/spi-overview.html#compatibility).
+        -->
+        <dep.trino.version>479</dep.trino.version>
+        <!-- Trino 479 SPI requires JDK 25 bytecode (class file 69). -->
+        <airbase.java.version>25</airbase.java.version>
+        <maven.compiler.release>${airbase.java.version}</maven.compiler.release>
+
+        <dep.airlift.version>386</dep.airlift.version>
+        <dep.arrow.version>18.3.0</dep.arrow.version>
+        <dep.guava.version>33.5.0-jre</dep.guava.version>
+        <dep.protobuf.version>4.30.2</dep.protobuf.version>
+        <dep.lz4.version>1.8.0</dep.lz4.version>
+        <dep.snakeyaml.version>2.2</dep.snakeyaml.version>
+        <dep.aircompressor.version>0.27</dep.aircompressor.version>
+
+        <dep.junit.version>5.10.1</dep.junit.version>
+        <dep.assertj.version>3.24.2</dep.assertj.version>
+        <dep.slf4j.version>2.0.9</dep.slf4j.version>
+        <dep.logback.version>1.4.11</dep.logback.version>
+
+        <trino.maven.plugin.version>21</trino.maven.plugin.version>
+        <license.maven.plugin.version>2.4.0</license.maven.plugin.version>
+        <skipITs>true</skipITs>
     </properties>
 
     <dependencyManagement>
@@ -48,22 +82,42 @@
             <dependency>
                 <groupId>io.trino</groupId>
                 <artifactId>trino-spi</artifactId>
-                <version>${trino.version}</version>
+                <version>${dep.trino.version}</version>
             </dependency>
             <dependency>
                 <groupId>io.trino</groupId>
                 <artifactId>trino-base-jdbc</artifactId>
-                <version>${trino.version}</version>
+                <version>${dep.trino.version}</version>
             </dependency>
             <dependency>
                 <groupId>io.trino</groupId>
                 <artifactId>trino-plugin-toolkit</artifactId>
-                <version>${trino.version}</version>
+                <version>${dep.trino.version}</version>
             </dependency>
             <dependency>
                 <groupId>io.trino</groupId>
                 <artifactId>trino-jdbc</artifactId>
-                <version>${trino.version}</version>
+                <version>${dep.trino.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.airlift</groupId>
+                <artifactId>slice</artifactId>
+                <version>2.3</version>
+            </dependency>
+            <dependency>
+                <groupId>com.fasterxml.jackson.core</groupId>
+                <artifactId>jackson-annotations</artifactId>
+                <version>2.20</version>
+            </dependency>
+            <dependency>
+                <groupId>io.opentelemetry</groupId>
+                <artifactId>opentelemetry-api</artifactId>
+                <version>1.49.0</version>
+            </dependency>
+            <dependency>
+                <groupId>io.opentelemetry</groupId>
+                <artifactId>opentelemetry-context</artifactId>
+                <version>1.49.0</version>
             </dependency>
         </dependencies>
     </dependencyManagement>
@@ -86,10 +140,75 @@
                 </plugin>
                 <plugin>
                     <groupId>org.apache.maven.plugins</groupId>
-                    <artifactId>maven-dependency-plugin</artifactId>
-                    <version>3.6.1</version>
+                    <artifactId>maven-enforcer-plugin</artifactId>
+                    <version>3.5.0</version>
+                </plugin>
+                <plugin>
+                    <groupId>io.trino</groupId>
+                    <artifactId>trino-maven-plugin</artifactId>
+                    <version>${trino.maven.plugin.version}</version>
+                    <extensions>true</extensions>
+                </plugin>
+                <plugin>
+                    <groupId>com.mycila</groupId>
+                    <artifactId>license-maven-plugin</artifactId>
+                    <version>${license.maven.plugin.version}</version>
+                    <configuration>
+                        <licenseSets>
+                            <licenseSet>
+                                <header>${maven.multiModuleProjectDirectory}/license-header.txt</header>
+                                <excludes>
+                                    <exclude>**/*.md</exclude>
+                                    <exclude>**/*.txt</exclude>
+                                    <exclude>**/*.yml</exclude>
+                                    <exclude>**/*.yaml</exclude>
+                                    <exclude>**/*.properties</exclude>
+                                    <exclude>**/*.bteq</exclude>
+                                    <exclude>**/*.template</exclude>
+                                    <exclude>**/lz4.c</exclude>
+                                    <exclude>**/lz4.h</exclude>
+                                    <exclude>**/sqltypes_td.h</exclude>
+                                    <exclude>**/target/**</exclude>
+                                    <exclude>**/.mvn/**</exclude>
+                                    <exclude>**/mvnw*</exclude>
+                                </excludes>
+                            </licenseSet>
+                        </licenseSets>
+                        <strictCheck>true</strictCheck>
+                    </configuration>
                 </plugin>
             </plugins>
         </pluginManagement>
+
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-enforcer-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>enforce-java-maven</id>
+                        <goals>
+                            <goal>enforce</goal>
+                        </goals>
+                        <configuration>
+                            <rules>
+                                <requireJavaVersion>
+                                    <version>[25,)</version>
+                                    <message>Trino ${dep.trino.version} SPI requires JDK 25+. Set JAVA_HOME accordingly.</message>
+                                </requireJavaVersion>
+                                <requireMavenVersion>
+                                    <version>[3.9.1,)</version>
+                                    <message>trino-maven-plugin requires Maven 3.9.1+. Use ./mvnw</message>
+                                </requireMavenVersion>
+                            </rules>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>com.mycila</groupId>
+                <artifactId>license-maven-plugin</artifactId>
+            </plugin>
+        </plugins>
     </build>
 </project>

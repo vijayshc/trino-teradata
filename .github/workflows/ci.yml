@@ -11,15 +11,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up JDK 21
+      - name: Set up JDK 25
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "21"
+          java-version: "25"
           cache: maven
 
-      - name: Build plugin (skip integration tests)
-        run: mvn -pl trino-plugin -am clean package -DskipTests -B
+      - name: Build plugin (trino-plugin packaging + unit tests)
+        run: ./mvnw -B -pl plugin/trino-teradata -am clean verify -DskipITs
 
       - name: Compile integration tests
-        run: mvn -pl testing/trino-tests -am test-compile -B
+        run: ./mvnw -B -pl testing/trino-teradata-tests -am test-compile
+
+      - name: License header check
+        run: ./mvnw -B license:check
