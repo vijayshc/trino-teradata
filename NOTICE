@@ -1,0 +1,46 @@
+trino-teradata-direct
+Copyright 2025-2026 The trino-teradata-direct contributors
+
+This product includes software developed for high-performance export
+of data from Teradata to Trino via a parallel binary bridge and a
+Teradata table operator (UDF).
+
+This product is not affiliated with, endorsed by, or sponsored by
+the Trino Software Foundation, Teradata Corporation, or Starburst Data.
+
+------------------------------------------------------------------------------
+Third-party components bundled or redistributed with source:
+
+Apache Trino (trino-spi, trino-base-jdbc, trino-plugin-toolkit)
+  Copyright The Trino Software Foundation / contributors
+  License: Apache License 2.0
+  https://trino.io/
+
+Airlift libraries (bootstrap, log, configuration, aircompressor)
+  License: Apache License 2.0
+
+Apache Arrow (optional Flight-related dependencies)
+  License: Apache License 2.0
+
+Google Guava, Protobuf
+  License: Apache License 2.0
+
+LZ4 compression library (lz4.c / lz4.h)
+  Copyright (c) 2011-2023, Yann Collet
+  License: BSD 2-Clause
+  See teradata-udf/lz4.h for full license text.
+
+SnakeYAML
+  License: Apache License 2.0
+
+------------------------------------------------------------------------------
+Not redistributed (bring-your-own / runtime only):
+
+Teradata JDBC Driver (terajdbc4.jar)
+  Proprietary — obtain from Teradata Tools and Utilities (TTU).
+  Must be installed into the Trino plugin directory at deploy time.
+
+Teradata SQL types headers (sqltypes_td.h)
+  The copy under teradata-udf/include/ is a local development mock.
+  On Teradata nodes, the UDF is compiled against headers from the
+  Teradata installation / TTU.

@@ -1,0 +1,103 @@
+-- Template: substitute TD_HOST / TD_LOGON_USER / TD_LOGON_PASSWORD before running.
+-- Example: sed -e "s|\${TD_HOST}|$TD_HOST|g" ...
+/* BTEQ Script to set up Dynamic Filtering Test Tables */
+/* Based on Trino dynamic filtering documentation examples */
+
+.LOGON ${TD_HOST}/${TD_LOGON_USER},${TD_LOGON_PASSWORD}
+
+/* Create the test database if it doesn't exist */
+DATABASE TrinoExport;
+
+/* Drop existing test tables if they exist */
+DROP TABLE date_dim;
+DROP TABLE store_sales;
+
+/* Create date_dim dimension table */
+CREATE TABLE date_dim (
+    d_date_sk INTEGER NOT NULL,
+    d_date_id CHAR(16) NOT NULL,
+    d_date DATE NOT NULL,
+    d_year INTEGER NOT NULL,
+    d_quarter_name CHAR(6),
+    d_month_name VARCHAR(10),
+    d_day_name VARCHAR(10),
+    d_following_holiday CHAR(1),
+    d_holiday CHAR(1)
+) PRIMARY INDEX (d_date_sk);
+
+/* Create store_sales fact table */
+CREATE TABLE store_sales (
+    ss_sold_date_sk INTEGER,
+    ss_item_sk INTEGER NOT NULL,
+    ss_customer_sk INTEGER,
+    ss_store_sk INTEGER,
+    ss_ticket_number INTEGER NOT NULL,
+    ss_quantity INTEGER,
+    ss_sales_price DECIMAL(7,2),
+    ss_ext_sales_price DECIMAL(7,2),
+    ss_net_profit DECIMAL(7,2)
+) PRIMARY INDEX (ss_ticket_number);
+
+/* Insert dimension data for date_dim (365 days for year 2000) */
+/* Generate dates for year 2000 */
+INSERT INTO date_dim VALUES (2451545, '2000-01-01-AAAA', DATE '2000-01-01', 2000, '2000Q1', 'January', 'Saturday', 'N', 'Y');
+INSERT INTO date_dim VALUES (2451546, '2000-01-02-AAAB', DATE '2000-01-02', 2000, '2000Q1', 'January', 'Sunday', 'Y', 'N');
+INSERT INTO date_dim VALUES (2451547, '2000-01-03-AAAC', DATE '2000-01-03', 2000, '2000Q1', 'January', 'Monday', 'N', 'N');
+INSERT INTO date_dim VALUES (2451548, '2000-01-04-AAAD', DATE '2000-01-04', 2000, '2000Q1', 'January', 'Tuesday', 'N', 'N');
+INSERT INTO date_dim VALUES (2451549, '2000-01-05-AAAE', DATE '2000-01-05', 2000, '2000Q1', 'January', 'Wednesday', 'N', 'N');
+INSERT INTO date_dim VALUES (2451550, '2000-01-06-AAAF', DATE '2000-01-06', 2000, '2000Q1', 'January', 'Thursday', 'N', 'N');
+INSERT INTO date_dim VALUES (2451551, '2000-01-07-AAAG', DATE '2000-01-07', 2000, '2000Q1', 'January', 'Friday', 'N', 'N');
+INSERT INTO date_dim VALUES (2451552, '2000-01-08-AAAH', DATE '2000-01-08', 2000, '2000Q1', 'January', 'Saturday', 'N', 'N');
+INSERT INTO date_dim VALUES (2451553, '2000-01-09-AAAI', DATE '2000-01-09', 2000, '2000Q1', 'January', 'Sunday', 'Y', 'N');
+INSERT INTO date_dim VALUES (2451554, '2000-01-10-AAAJ', DATE '2000-01-10', 2000, '2000Q1', 'January', 'Monday', 'N', 'N');
+
+/* More dates - some from different years for filtering test */
+INSERT INTO date_dim VALUES (2451910, '2001-01-01-ABAA', DATE '2001-01-01', 2001, '2001Q1', 'January', 'Monday', 'N', 'Y');
+INSERT INTO date_dim VALUES (2451911, '2001-01-02-ABAB', DATE '2001-01-02', 2001, '2001Q1', 'January', 'Tuesday', 'Y', 'N');
+INSERT INTO date_dim VALUES (2451912, '2001-01-03-ABAC', DATE '2001-01-03', 2001, '2001Q1', 'January', 'Wednesday', 'N', 'N');
+
+INSERT INTO date_dim VALUES (2452275, '2002-01-01-ACAA', DATE '2002-01-01', 2002, '2002Q1', 'January', 'Tuesday', 'N', 'Y');
+INSERT INTO date_dim VALUES (2452276, '2002-01-02-ACAB', DATE '2002-01-02', 2002, '2002Q1', 'January', 'Wednesday', 'Y', 'N');
+
+/* Insert fact data for store_sales */
+/* Sales linked to year 2000 dates (will be filtered in) */
+INSERT INTO store_sales VALUES (2451546, 1001, 5001, 101, 10001, 5, 25.99, 129.95, 15.50);
+INSERT INTO store_sales VALUES (2451546, 1002, 5002, 101, 10002, 3, 15.50, 46.50, 8.25);
+INSERT INTO store_sales VALUES (2451553, 1003, 5003, 102, 10003, 10, 8.99, 89.90, 22.50);
+INSERT INTO store_sales VALUES (2451545, 1004, 5004, 101, 10004, 2, 199.99, 399.98, 80.00);
+INSERT INTO store_sales VALUES (2451547, 1005, 5005, 102, 10005, 1, 599.99, 599.99, 100.00);
+INSERT INTO store_sales VALUES (2451548, 1006, 5006, 103, 10006, 4, 12.99, 51.96, 12.00);
+INSERT INTO store_sales VALUES (2451549, 1007, 5007, 101, 10007, 8, 9.99, 79.92, 20.00);
+INSERT INTO store_sales VALUES (2451550, 1008, 5008, 102, 10008, 2, 45.00, 90.00, 25.00);
+INSERT INTO store_sales VALUES (2451551, 1009, 5009, 103, 10009, 6, 7.50, 45.00, 10.00);
+INSERT INTO store_sales VALUES (2451552, 1010, 5010, 101, 10010, 3, 29.99, 89.97, 18.00);
+
+/* Sales linked to year 2001 dates (will be filtered out when d_year=2000) */
+INSERT INTO store_sales VALUES (2451910, 1011, 5011, 101, 10011, 5, 30.00, 150.00, 35.00);
+INSERT INTO store_sales VALUES (2451911, 1012, 5012, 102, 10012, 7, 18.50, 129.50, 28.00);
+INSERT INTO store_sales VALUES (2451912, 1013, 5013, 103, 10013, 2, 75.00, 150.00, 32.00);
+
+/* Sales linked to year 2002 dates (will be filtered out when d_year=2000) */
+INSERT INTO store_sales VALUES (2452275, 1014, 5014, 101, 10014, 4, 22.00, 88.00, 20.00);
+INSERT INTO store_sales VALUES (2452276, 1015, 5015, 102, 10015, 9, 11.99, 107.91, 24.00);
+
+/* Add more sales data to make the fact table larger */
+INSERT INTO store_sales VALUES (2451546, 1016, 5016, 103, 10016, 6, 33.99, 203.94, 45.00);
+INSERT INTO store_sales VALUES (2451553, 1017, 5017, 101, 10017, 4, 44.50, 178.00, 38.00);
+INSERT INTO store_sales VALUES (2451546, 1018, 5018, 102, 10018, 2, 89.00, 178.00, 35.00);
+INSERT INTO store_sales VALUES (2451553, 1019, 5019, 103, 10019, 8, 5.99, 47.92, 12.00);
+INSERT INTO store_sales VALUES (2451546, 1020, 5020, 101, 10020, 1, 299.99, 299.99, 60.00);
+
+/* Verify data */
+SELECT 'date_dim row count:', COUNT(*) FROM date_dim;
+SELECT 'store_sales row count:', COUNT(*) FROM store_sales;
+
+/* Test query - this should use dynamic filtering */
+/* When d_year=2000 AND d_following_holiday='Y', only d_date_sk 2451546 and 2451553 match */
+SELECT COUNT(*) AS matching_sales 
+FROM store_sales 
+JOIN date_dim ON store_sales.ss_sold_date_sk = date_dim.d_date_sk 
+WHERE d_following_holiday='Y' AND d_year = 2000;
+
+.LOGOFF;
+.EXIT;

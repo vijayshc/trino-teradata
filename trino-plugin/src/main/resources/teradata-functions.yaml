@@ -1,0 +1,103 @@
+# Teradata Function Mappings Configuration
+# 
+# This file defines how Trino functions are translated to Teradata SQL.
+# Format: trino_function: "teradata_template"
+# Use $1, $2, $3... for argument placeholders (1-indexed)
+#
+# Example: substring: "SUBSTR($1, $2, $3)"
+#   Trino:    SUBSTRING(col, 1, 5)
+#   Teradata: SUBSTR(col, 1, 5)
+
+functions:
+  # String functions
+  substring: "SUBSTR($1, $2, $3)"
+  substr: "SUBSTR($1, $2, $3)"
+  concat: "($1 || $2)"
+  upper: "UPPER($1)"
+  lower: "LOWER($1)"
+  trim: "TRIM($1)"
+  ltrim: "LTRIM($1)"
+  rtrim: "RTRIM($1)"
+  length: "CHARACTER_LENGTH($1)"
+  char_length: "CHARACTER_LENGTH($1)"
+  character_length: "CHARACTER_LENGTH($1)"
+  replace: "OREPLACE($1, $2, $3)"
+  position: "POSITION($1 IN $2)"
+  strpos: "POSITION($1 IN $2)"
+  reverse: "REVERSE($1)"
+  lpad: "LPAD($1, $2, $3)"
+  rpad: "RPAD($1, $2, $3)"
+  
+  # Math functions
+  abs: "ABS($1)"
+  ceil: "CEILING($1)"
+  ceiling: "CEILING($1)"
+  floor: "FLOOR($1)"
+  round: "ROUND($1, $2)"
+  truncate: "TRUNC($1, $2)"
+  trunc: "TRUNC($1, $2)"
+  mod: "MOD($1, $2)"
+  power: "POWER($1, $2)"
+  pow: "POWER($1, $2)"
+  sqrt: "SQRT($1)"
+  exp: "EXP($1)"
+  ln: "LN($1)"
+  log: "LOG($1)"
+  log10: "LOG($1)"
+  sign: "SIGN($1)"
+  
+  # Date/Time functions
+  current_date: "CURRENT_DATE"
+  current_timestamp: "CURRENT_TIMESTAMP"
+  current_time: "CURRENT_TIME"
+  now: "CURRENT_TIMESTAMP"
+  year: "EXTRACT(YEAR FROM $1)"
+  month: "EXTRACT(MONTH FROM $1)"
+  day: "EXTRACT(DAY FROM $1)"
+  day_of_month: "EXTRACT(DAY FROM $1)"
+  hour: "EXTRACT(HOUR FROM $1)"
+  minute: "EXTRACT(MINUTE FROM $1)"
+  second: "EXTRACT(SECOND FROM $1)"
+  day_of_week: "TD_DAY_OF_WEEK($1)"
+  day_of_year: "TD_DAY_OF_YEAR($1)"
+  week: "TD_WEEK_OF_YEAR($1)"
+  week_of_year: "TD_WEEK_OF_YEAR($1)"
+  quarter: "TD_QUARTER_OF_YEAR($1)"
+  date_trunc: "TRUNC($2, '$1')"
+  date_add: "($2 + INTERVAL '$3' $1)"
+  
+  # Type conversion
+  to_char: "TO_CHAR($1, $2)"
+  to_date: "TO_DATE($1, $2)"
+  to_number: "TO_NUMBER($1)"
+  
+  # NULL handling
+  coalesce: "COALESCE($1, $2)"
+  nullif: "NULLIF($1, $2)"
+  nvl: "NVL($1, $2)"
+  ifnull: "NVL($1, $2)"
+  zeroifnull: "ZEROIFNULL($1)"
+  nullifzero: "NULLIFZERO($1)"
+  
+  # Conditional
+  greatest: "GREATEST($1, $2)"
+  least: "LEAST($1, $2)"
+
+# Functions that should NOT be pushed down to Teradata
+# (Will be evaluated by Trino after data retrieval)
+disabled:
+  - regexp_like
+  - regexp_replace
+  - regexp_extract
+  - json_extract
+  - json_extract_scalar
+  - json_parse
+  - array_agg
+  - array_join
+  - transform
+  - filter
+  - reduce
+  - map_keys
+  - map_values
+  - url_extract_host
+  - url_extract_path

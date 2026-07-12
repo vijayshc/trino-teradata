@@ -1,0 +1,71 @@
+# Trino catalog properties for the Teradata Direct connector.
+# Copy to $TRINO_HOME/etc/catalog/tdexport.properties and edit.
+#
+# connector.name must match the plugin ConnectorFactory name.
+
+connector.name=teradata_export
+
+# ============================================================
+# Teradata JDBC (control plane)
+# ============================================================
+teradata.url=jdbc:teradata://YOUR_TD_HOST/DATABASE=DBC,TMODE=TERA
+teradata.user=YOUR_SERVICE_USER
+# Prefer a password script over a plaintext password in production:
+# teradata.password-script=/etc/trino/secrets/td-password.sh
+teradata.password=YOUR_PASSWORD
+
+# Teradata server timezone offset (TIME/TIMESTAMP conversion)
+teradata.timezone=-05:00
+
+# ============================================================
+# Bridge / network (data plane)
+# ============================================================
+# Legacy Flight port (unused by the direct binary path; kept for config compat)
+teradata.export.flight-port=50051
+teradata.export.flight-bind-address=0.0.0.0
+
+# Binary bridge listen port on each Trino worker
+teradata.export.bridge-port=9999
+
+# Single-worker convenience address (multi-worker: use worker-advertised-addresses)
+teradata.export.trino-address=YOUR_TRINO_HOST
+
+# Comma-separated host:port list of worker bridges reachable from Teradata AMPs
+# Example multi-node: 10.0.0.1:9998,10.0.0.1:9999
+teradata.export.worker-advertised-addresses=YOUR_TRINO_HOST:9999
+
+# ============================================================
+# Performance
+# ============================================================
+teradata.export.batch-size=500000
+teradata.export.socket-receive-buffer-size=134217728
+teradata.export.input-buffer-size=16777216
+teradata.export.buffer-queue-capacity=500
+teradata.export.page-poll-timeout-ms=100
+teradata.export.compression-enabled=true
+teradata.export.compression-algorithm=LZ4
+teradata.export.splits-per-worker=4
+
+# ============================================================
+# Pushdown
+# ============================================================
+teradata.export.dynamic-filter-timeout=10s
+teradata.export.enable-dynamic-filtering=true
+teradata.export.enable-aggregation-pushdown=true
+teradata.export.enable-topn-pushdown=true
+teradata.export.enable-join-pushdown=true
+teradata.export.enable-complex-join-pushdown=true
+teradata.export.enable-complex-expression-pushdown=true
+teradata.export.domain-compaction-threshold=100
+
+# ============================================================
+# Security
+# ============================================================
+# Require PROXYUSER identity propagation (recommended)
+teradata.export.enforce-proxy-authentication=true
+
+# ============================================================
+# UDF location on Teradata
+# ============================================================
+teradata.export.udf-database=TrinoExport
+teradata.export.udf-name=ExportToTrino

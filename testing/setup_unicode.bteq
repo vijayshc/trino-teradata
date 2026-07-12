@@ -1,0 +1,32 @@
+-- Template: substitute TD_HOST / TD_LOGON_USER / TD_LOGON_PASSWORD before running.
+-- Example: sed -e "s|\${TD_HOST}|$TD_HOST|g" ...
+.LOGON ${TD_HOST}/${TD_LOGON_USER},${TD_LOGON_PASSWORD}
+DATABASE TrinoExport;
+.SET SESSION CHARSET 'UTF8';
+.SET ERRORLEVEL 3807 SEVERITY 0
+DROP TABLE test_unicode;
+.SET ERRORLEVEL 3807 SEVERITY 8
+
+CREATE TABLE test_unicode (
+    test_id INTEGER NOT NULL,
+    col_unicode VARCHAR(200) CHARACTER SET UNICODE,
+    col_latin VARCHAR(100) CHARACTER SET LATIN,
+    description VARCHAR(100)
+) PRIMARY INDEX (test_id);
+
+/* Chinese characters */
+INSERT INTO test_unicode VALUES (1, '中文测试', 'Chinese test', 'Chinese chars');
+/* Thai characters */
+INSERT INTO test_unicode VALUES (2, 'ทดสอบ', 'Thai test', 'Thai chars');
+/* Japanese characters */
+INSERT INTO test_unicode VALUES (3, '日本語', 'Japanese test', 'Japanese');
+/* Korean characters */
+INSERT INTO test_unicode VALUES (4, '한국어', 'Korean test', 'Korean');
+/* Emoji */
+INSERT INTO test_unicode VALUES (5, 'Hello 🌍', 'Latin only', 'Basic ASCII mixed');
+/* Mixed Unicode and ASCII */
+INSERT INTO test_unicode VALUES (6, 'Test 中文 Mix', 'Mixed test', 'Mixed');
+
+SELECT * FROM test_unicode ORDER BY test_id;
+.LOGOFF;
+.EXIT;
