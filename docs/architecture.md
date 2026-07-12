@@ -140,4 +140,4 @@ Details: [../SECURITY.md](../SECURITY.md).
 
 - Not a full bi-directional write connector (INSERT/CTAS to Teradata is not the product focus).
 - Not Arrow Flight on the hot path (a legacy Flight server class may still bind for config compatibility; bulk transfer is the binary bridge).
-- Not affiliated with Starburst’s commercial Teradata Direct connector; architecture is similar in spirit (table operator + parallel path) but independently implemented and open source under Apache-2.0.
+- Independently implemented open-source Direct-style path (table operator + parallel bridge); not an official Trino or Teradata product.

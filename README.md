@@ -7,7 +7,7 @@ Teradata using a **parallel binary path** (table operator on AMPs → TCP bridge
 workers → direct `Page` parsing), as an open alternative to commercial Direct-style
 connectors.
 
-> Not affiliated with the Trino Software Foundation, Teradata Corporation, or Starburst Data.
+> Not affiliated with the Trino Software Foundation or Teradata Corporation.
 
 Packaging follows Trino’s
 [`trino-plugin` SPI conventions](https://trino.io/docs/current/develop/spi-overview.html).

@@ -6,7 +6,7 @@ of data from Teradata to Trino via a parallel binary bridge and a
 Teradata table operator (UDF).
 
 This product is not affiliated with, endorsed by, or sponsored by
-the Trino Software Foundation, Teradata Corporation, or Starburst Data.
+the Trino Software Foundation or Teradata Corporation.
 
 ------------------------------------------------------------------------------
 Third-party components bundled or redistributed with source:
