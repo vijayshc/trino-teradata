@@ -3,6 +3,9 @@
 *.class
 *.jar
 !**/src/**/resources/**/*.jar
+# Published convenience binaries (no proprietary JDBC)
+!prebuilt/*.jar
+!prebuilt/*.zip
 *.o
 *.so
 *.a
@@ -38,7 +41,7 @@ scripts/register.bteq.local
 # Generated UDF registration
 scripts/register.generated.bteq
 
-# Release staging only (NOT plugin/trino-teradata source module)
+# Local release staging (published copies live under prebuilt/)
 /dist/
 
 # Test outputs

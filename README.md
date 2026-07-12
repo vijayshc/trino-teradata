@@ -43,6 +43,7 @@ Generic JDBC extract is row-at-a-time and coordinator-heavy. This connector:
 
 ```text
 plugin/trino-teradata/            # Trino plugin (packaging: trino-plugin)
+prebuilt/                         # Prebuilt plugin ZIP (no terajdbc)
 teradata-udf/                     # ExportToTrino C table operator + LZ4
 testing/trino-teradata-tests/     # Live-cluster integration tests
 testing/trino-teradata-stress/    # Concurrent stress + bottleneck tools
@@ -52,6 +53,23 @@ docs/                             # architecture, install, EOS, config
 ```
 
 ## Quick start
+
+### Option A — prebuilt (no Maven)
+
+```bash
+export TRINO_HOME=/path/to/trino-server-479
+export TERADATA_JDBC_JAR=/path/to/terajdbc4.jar   # BYO
+
+PLUGIN_DIR="$TRINO_HOME/plugin/teradata-export"
+mkdir -p "$PLUGIN_DIR"
+unzip -j prebuilt/trino-teradata-479-1-SNAPSHOT.zip -d "$PLUGIN_DIR"
+cp "$TERADATA_JDBC_JAR" "$PLUGIN_DIR/terajdbc4.jar"
+# then catalog + restart (below)
+```
+
+See [prebuilt/README.md](prebuilt/README.md).
+
+### Option B — build from source
 
 ```bash
 # Build

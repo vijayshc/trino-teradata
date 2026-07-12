@@ -10,7 +10,30 @@
 | Teradata | Table operator / UDF support; AMPs can open outbound TCP to workers |
 | Teradata JDBC | Proprietary `terajdbc4.jar` (not redistributed) |
 
-## 1. Build the plugin
+## 1. Obtain the plugin
+
+### Prebuilt (no Maven)
+
+Convenience binaries ship under [`prebuilt/`](../prebuilt/README.md)
+(Trino **479** only; **no** proprietary JDBC):
+
+```text
+prebuilt/trino-teradata-479-1-SNAPSHOT.zip   # full plugin (use this)
+prebuilt/trino-teradata-479-1-SNAPSHOT.jar   # connector classes only
+prebuilt/SHA256SUMS.txt
+```
+
+```bash
+cd prebuilt && sha256sum -c SHA256SUMS.txt
+```
+
+Refresh published binaries after a source change:
+
+```bash
+./scripts/package_plugin.sh
+```
+
+### Build from source
 
 ```bash
 export JAVA_HOME=/path/to/jdk-25
@@ -37,12 +60,15 @@ export TERADATA_JDBC_JAR=/path/to/terajdbc4.jar
 ./scripts/deploy.sh
 ```
 
-Or manually:
+Or manually from **prebuilt** or **target**:
 
 ```bash
 PLUGIN_DIR=$TRINO_HOME/plugin/teradata-export   # directory name is free-form
 mkdir -p "$PLUGIN_DIR"
-cp plugin/trino-teradata/target/trino-teradata-479-1-SNAPSHOT/*.jar "$PLUGIN_DIR/"
+# prebuilt:
+unzip -j prebuilt/trino-teradata-479-1-SNAPSHOT.zip -d "$PLUGIN_DIR"
+# or from a local Maven build:
+# cp plugin/trino-teradata/target/trino-teradata-479-1-SNAPSHOT/*.jar "$PLUGIN_DIR/"
 cp "$TERADATA_JDBC_JAR" "$PLUGIN_DIR/terajdbc4.jar"
 ```
 
