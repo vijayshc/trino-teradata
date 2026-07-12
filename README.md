@@ -1,11 +1,10 @@
 # Trino Teradata Direct Connector
 
-**Apache License 2.0** · Unofficial community plugin
+**Apache License 2.0**
 
 High-performance **read** connector for [Trino](https://trino.io) that extracts data from
 Teradata using a **parallel binary path** (table operator on AMPs → TCP bridge on Trino
-workers → direct `Page` parsing), as an open alternative to commercial Direct-style
-connectors.
+workers → direct `Page` parsing).
 
 > Not affiliated with the Trino Software Foundation or Teradata Corporation.
 
@@ -122,4 +121,4 @@ Licensed under the [Apache License, Version 2.0](LICENSE).
 
 ## Trademarks
 
-Trino®, Teradata®, and Starburst® are trademarks of their respective owners.
+Trino® and Teradata® are trademarks of their respective owners.

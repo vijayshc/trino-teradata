@@ -244,12 +244,11 @@ grep "DETERMINISTIC EOS" $TRINO_HOME/data/var/log/server.log | tail
 
 ---
 
-## 8. Limitations (honest)
+## 8. Limitations
 
 - Optimized for **SELECT** / analytics extract, not general-purpose writes to Teradata.
 - Trino version compatibility is **pinned** to the SPI version in the POM (479 today).
 - Requires installing a UDF on Teradata and opening AMP→worker network paths.
-- Not an official Trino Software Foundation or Teradata product.
 
 ---
 

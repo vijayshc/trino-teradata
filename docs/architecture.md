@@ -6,10 +6,10 @@ For SPI packaging and contributor rules see [development.md](development.md).
 
 ## Overview
 
-The connector is a **read-oriented Direct path**: JDBC is the control plane
-(metadata, planning, pushdown, UDF invocation); bulk row data never returns over
-JDBC. Rows stream in parallel from Teradata AMPs to Trino workers over a binary
-TCP bridge and are parsed directly into Trino `Page` objects.
+The connector is **read-oriented**: JDBC is the control plane (metadata, planning,
+pushdown, UDF invocation); bulk row data never returns over JDBC. Rows stream in
+parallel from Teradata AMPs to Trino workers over a binary TCP bridge and are
+parsed directly into Trino `Page` objects.
 
 ```text
 ┌──────────────────── Trino ────────────────────┐
@@ -136,8 +136,7 @@ Details: [../SECURITY.md](../SECURITY.md).
 | `MetadataRefreshService` | Background catalog cache warm-up |
 | `teradata-udf/export_to_trino.c` | Table operator serialization + routing |
 
-## What this connector is not
+## Scope notes
 
-- Not a full bi-directional write connector (INSERT/CTAS to Teradata is not the product focus).
-- Not Arrow Flight on the hot path (a legacy Flight server class may still bind for config compatibility; bulk transfer is the binary bridge).
-- Independently implemented open-source Direct-style path (table operator + parallel bridge); not an official Trino or Teradata product.
+- Optimized for **SELECT** / extract workloads; write paths (INSERT/CTAS into Teradata) are not the focus.
+- Bulk transfer uses the binary bridge. A legacy Flight server class may still bind for config compatibility but is not used on the hot path.
