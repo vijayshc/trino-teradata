@@ -60,7 +60,7 @@ public class TeradataBridgeServer implements AutoCloseable {
         this.socketReceiveBufferSize = config.getSocketReceiveBufferSize();
         this.inputBufferSize = config.getInputBufferSize();
         
-        // Use bounded thread pool to prevent memory exhaustion
+        // Bounded pool: never run handlers on the accept thread (CallerRuns freezes accept under load).
         int coreThreads = config.getBridgeCorePoolSize();
         int maxThreads = config.getMaxBridgeThreads();
         int queueCapacity = config.getBridgeQueueCapacity();
@@ -74,10 +74,9 @@ public class TeradataBridgeServer implements AutoCloseable {
                     t.setDaemon(true);
                     return t;
                 },
-                new ThreadPoolExecutor.CallerRunsPolicy()  // Back-pressure: caller handles if queue full
-        );
+                new ThreadPoolExecutor.AbortPolicy());
         
-        log.debug("TeradataBridgeServer initialized with socketReceiveBufferSize=%d, inputBufferSize=%d, coreThreads=%d, maxThreads=%d, queueCapacity=%d",
+        log.info("TeradataBridgeServer initialized with socketReceiveBufferSize=%d, inputBufferSize=%d, coreThreads=%d, maxThreads=%d, queueCapacity=%d",
                 socketReceiveBufferSize, inputBufferSize, coreThreads, maxThreads, queueCapacity);
     }
 
@@ -99,7 +98,17 @@ public class TeradataBridgeServer implements AutoCloseable {
                     clientSocket.setReceiveBufferSize(socketReceiveBufferSize);
                     clientSocket.setSoTimeout(config.getBridgeSocketTimeoutMs());
                     log.debug("Connection from %s", clientSocket.getRemoteSocketAddress());
-                    executor.submit(() -> handleClient(clientSocket));
+                    try {
+                        executor.submit(() -> handleClient(clientSocket));
+                    }
+                    catch (java.util.concurrent.RejectedExecutionException rex) {
+                        log.warn("Bridge saturated — rejecting connection from %s", clientSocket.getRemoteSocketAddress());
+                        try {
+                            clientSocket.close();
+                        }
+                        catch (IOException ignored) {
+                        }
+                    }
                 } catch (IOException e) {
                     if (running) {
                         log.warn("Error accepting connection: %s", e.getMessage());
@@ -196,29 +205,33 @@ public class TeradataBridgeServer implements AutoCloseable {
             // Initialize profiler
             PerformanceProfiler.getOrCreate(queryId);
             
-            // Synchronous processing - create decompression buffer with enough space for max Teradata batch (16MB)
-            // Using 32MB to be absolutely safe and avoid reallocations
+            // Reusable buffers: grow as needed, avoid per-batch allocation (GC under high QPM)
             inflater = (compressionType == 1) ? new java.util.zip.Inflater() : null;
             io.airlift.compress.lz4.Lz4Decompressor lz4Decompressor = (compressionType == 2) ? new io.airlift.compress.lz4.Lz4Decompressor() : null;
-            byte[] decompressionBuffer = (compressionType != 0) ? new byte[32 * 1024 * 1024] : null;
+            // Start smaller for small-query QPM; grow to max 16MB raw / 24MB decompress headroom
+            byte[] batchData = new byte[64 * 1024];
+            byte[] decompressionBuffer = (compressionType != 0) ? new byte[256 * 1024] : null;
 
-            // Read and process batches synchronously until end of stream
+            // Read and process batches until end of stream (push-before-decrement for EOS)
             while (true) {
-                // Profile: Network Read
                 long netStart = System.nanoTime();
                 int batchLen = in.readInt();
                 if (batchLen == 0) {
                     log.debug("End of stream (marker) for query %s", queryId);
                     break;
                 }
+                if (batchLen < 0 || batchLen > 32 * 1024 * 1024) {
+                    throw new IOException("Invalid batch length: " + batchLen);
+                }
                 
-                byte[] batchData = new byte[batchLen];
-                in.readFully(batchData);
+                if (batchData.length < batchLen) {
+                    batchData = new byte[Math.max(batchLen, batchData.length * 2)];
+                }
+                in.readFully(batchData, 0, batchLen);
                 long netEnd = System.nanoTime();
                 PerformanceProfiler.recordNetworkRead(queryId, netEnd - netStart, batchLen);
                 compressedBytes += batchLen;
                 
-                // SYNCHRONOUS: Decompress immediately in this thread
                 byte[] decompressed;
                 int decompressedLen;
                 
@@ -226,23 +239,27 @@ public class TeradataBridgeServer implements AutoCloseable {
                     long decompStart = System.nanoTime();
                     inflater.reset();
                     inflater.setInput(batchData, 0, batchLen);
-                    
-                    // Ensure buffer is large enough for decompression. 
-                    // Max Teradata batch is 16MB, so 32MB should always be enough.
-                    if (decompressionBuffer.length < 32 * 1024 * 1024) {
-                        decompressionBuffer = new byte[32 * 1024 * 1024];
+                    if (decompressionBuffer.length < batchLen * 4) {
+                        decompressionBuffer = new byte[Math.min(24 * 1024 * 1024, Math.max(batchLen * 8, decompressionBuffer.length * 2))];
                     }
-                    
                     decompressedLen = inflater.inflate(decompressionBuffer);
+                    // Grow once if first inflate filled buffer incompletely
+                    if (!inflater.finished() && decompressedLen == decompressionBuffer.length) {
+                        byte[] bigger = new byte[Math.min(24 * 1024 * 1024, decompressionBuffer.length * 2)];
+                        System.arraycopy(decompressionBuffer, 0, bigger, 0, decompressedLen);
+                        int more = inflater.inflate(bigger, decompressedLen, bigger.length - decompressedLen);
+                        decompressedLen += more;
+                        decompressionBuffer = bigger;
+                    }
                     long decompEnd = System.nanoTime();
                     PerformanceProfiler.recordDecompression(queryId, decompEnd - decompStart, decompressedLen);
                     decompressed = decompressionBuffer;
                     decompressedBytes += decompressedLen;
                 } else if (compressionType == 2) { /* LZ4 */
                     long decompStart = System.nanoTime();
-                    // Ensure buffer is large enough.
-                    if (decompressionBuffer.length < 32 * 1024 * 1024) {
-                        decompressionBuffer = new byte[32 * 1024 * 1024];
+                    if (decompressionBuffer.length < 16 * 1024 * 1024) {
+                        // LZ4 needs known dest capacity; Teradata batch raw max is 16MB
+                        decompressionBuffer = new byte[16 * 1024 * 1024];
                     }
                     decompressedLen = lz4Decompressor.decompress(batchData, 0, batchLen, decompressionBuffer, 0, decompressionBuffer.length);
                     long decompEnd = System.nanoTime();
@@ -255,7 +272,6 @@ public class TeradataBridgeServer implements AutoCloseable {
                     decompressedBytes += batchLen;
                 }
 
-                // SYNCHRONOUS: Parse directly to Trino Page in this thread
                 long parseStart = System.nanoTime();
                 io.trino.spi.Page page = DirectTrinoPageParser.parseDirectToPage(decompressed, decompressedLen, columns);
                 long parseEnd = System.nanoTime();
@@ -264,8 +280,6 @@ public class TeradataBridgeServer implements AutoCloseable {
                     totalRows += page.getPositionCount();
                     PerformanceProfiler.recordDirectParsing(queryId, parseEnd - parseStart, page.getPositionCount());
                     
-                    // SYNCHRONOUS: Push to buffer in this thread
-                    // Data is in buffer BEFORE we move to next batch or decrement connection
                     long pushStart = System.nanoTime();
                     DataBufferRegistry.pushData(queryId, page);
                     long pushEnd = System.nanoTime();

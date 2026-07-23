@@ -772,12 +772,12 @@ void ExportToTrino(void) {
     
     unsigned char emsg[4] = {0,0,0,0}; send_all(sock_fd, emsg, 4); 
     
-    /* Close data socket before sending control message to avoid race with activeConnections count */
+    /* Close data socket after all pages are pushed. Bridge treats data-socket close
+     * as the authoritative AMP completion signal (push-before-decrement EOS), so the
+     * extra TERADATA_FINISHED TCP hop is no longer required for correctness and is
+     * skipped to cut per-AMP latency under high concurrency. */
     close(sock_fd);
     sock_fd = -1;
-
-    /* Signal Teradata side finished for this AMP */
-    send_control_message(params, 1); /* 1 = TERADATA_FINISHED */
 
 send_status:
     if (sock_fd >= 0) close(sock_fd);

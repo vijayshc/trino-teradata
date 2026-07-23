@@ -25,8 +25,6 @@ import io.trino.spi.connector.SourcePage;
 
 import java.io.IOException;
 import java.util.List;
-import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 /**
@@ -38,7 +36,6 @@ public class TrinoExportPageSource implements ConnectorPageSource {
     private static final Logger log = Logger.get(TrinoExportPageSource.class);
     
     private final String queryId;
-    private final BlockingQueue<BatchContainer> buffer;
     private final List<JdbcColumnHandle> sqlOrderColumns;     // Order of columns in SQL (matches binary data)
     private final List<JdbcColumnHandle> trinoExpectedColumns; // Order Trino expects in output
     private final int[] columnReorderMap;  // Maps from Trino expected position to SQL position
@@ -68,8 +65,6 @@ public class TrinoExportPageSource implements ConnectorPageSource {
             if (token != null) {
                 DataBufferRegistry.registerDynamicToken(queryId, token);
             }
-            
-            this.buffer = DataBufferRegistry.getBuffer(queryId);
             
             // Register this instance as a consumer to support parallel split processing
             DataBufferRegistry.incrementConsumers(queryId);
@@ -207,7 +202,7 @@ public class TrinoExportPageSource implements ConnectorPageSource {
         try {
             // Profile: Queue Poll
             long pollStart = System.nanoTime();
-            BatchContainer container = buffer.poll(pagePollTimeoutMs, TimeUnit.MILLISECONDS);
+            BatchContainer container = DataBufferRegistry.pollData(queryId, pagePollTimeoutMs);
             long pollEnd = System.nanoTime();
             boolean waited = container == null || (pollEnd - pollStart) > 1_000_000;
             PerformanceProfiler.recordQueuePoll(queryId, pollEnd - pollStart, waited);
@@ -219,7 +214,13 @@ public class TrinoExportPageSource implements ConnectorPageSource {
             if (container.isEndOfStream()) {
                 log.debug("Received end of stream for query %s", queryId);
                 finished = true;
-                PerformanceProfiler.generateSummary(queryId);
+                // Full profile summary is expensive; only emit when debug logging is on
+                if (enableDebugLogging) {
+                    PerformanceProfiler.generateSummary(queryId);
+                }
+                else {
+                    PerformanceProfiler.clear(queryId);
+                }
                 return null;
             }
 
@@ -243,7 +244,7 @@ public class TrinoExportPageSource implements ConnectorPageSource {
 
     @Override
     public long getMemoryUsage() {
-        return 0;
+        return DataBufferRegistry.estimateBufferedBytes(queryId);
     }
 
     @Override

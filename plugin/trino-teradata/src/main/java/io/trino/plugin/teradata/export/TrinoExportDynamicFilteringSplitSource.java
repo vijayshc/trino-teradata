@@ -37,6 +37,7 @@ import io.trino.plugin.jdbc.SliceWriteFunction;
 import io.airlift.slice.Slice;
 
 import java.io.DataOutputStream;
+import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
@@ -44,6 +45,8 @@ import java.sql.SQLException;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -51,6 +54,17 @@ import java.util.concurrent.atomic.AtomicBoolean;
  */
 public class TrinoExportDynamicFilteringSplitSource implements ConnectorSplitSource {
     private static final Logger log = Logger.get(TrinoExportDynamicFilteringSplitSource.class);
+
+    /**
+     * Dedicated pool for control-plane broadcasts so we never deadlock the split executor
+     * (which runs triggerTeradataExecution and must not wait on itself).
+     */
+    private static final ExecutorService CONTROL_BROADCAST_EXECUTOR =
+            java.util.concurrent.Executors.newFixedThreadPool(32, r -> {
+                Thread t = new Thread(r, "teradata-control-broadcast");
+                t.setDaemon(true);
+                return t;
+            });
 
     private final List<ConnectorSplit> splits;
     private final DynamicFilter dynamicFilter;
@@ -65,6 +79,7 @@ public class TrinoExportDynamicFilteringSplitSource implements ConnectorSplitSou
     private final TeradataQueryBuilder queryBuilder;
     private final ConnectorSession session;
     private final TeradataConnectionPool connectionPool;
+    private final Semaphore queryConcurrency;
     
     private final AtomicBoolean teradataExecutionStarted = new AtomicBoolean(false);
     private final AtomicBoolean splitsReturned = new AtomicBoolean(false);
@@ -83,7 +98,8 @@ public class TrinoExportDynamicFilteringSplitSource implements ConnectorSplitSou
             TeradataClient teradataClient,
             TeradataQueryBuilder queryBuilder,
             ConnectorSession session,
-            TeradataConnectionPool connectionPool) {
+            TeradataConnectionPool connectionPool,
+            Semaphore queryConcurrency) {
         this.splits = new ArrayList<>(splits);
         this.dynamicFilter = dynamicFilter;
         this.tableHandle = tableHandle;
@@ -97,6 +113,7 @@ public class TrinoExportDynamicFilteringSplitSource implements ConnectorSplitSou
         this.queryBuilder = queryBuilder;
         this.session = session;
         this.connectionPool = connectionPool;
+        this.queryConcurrency = queryConcurrency;
     }
 
     @Override
@@ -107,7 +124,7 @@ public class TrinoExportDynamicFilteringSplitSource implements ConnectorSplitSou
 
         if (config.isEnableDynamicFiltering() && dynamicFilter != null && dynamicFilter.isAwaitable()) {
             if (!dynamicFilter.isComplete()) {
-                log.info("Waiting for dynamic filter for query %s", splitId);
+                log.debug("Waiting for dynamic filter for query %s", splitId);
                 CompletableFuture<?> blocked = dynamicFilter.isBlocked().toCompletableFuture();
                 return blocked.thenApply(v -> createSplitBatchWithTeradataExecution());
             }
@@ -118,7 +135,7 @@ public class TrinoExportDynamicFilteringSplitSource implements ConnectorSplitSou
 
     private ConnectorSplitBatch createSplitBatchWithTeradataExecution() {
         if (teradataExecutionStarted.compareAndSet(false, true)) {
-            log.info("Triggering Teradata execution for query %s", splitId);
+            log.debug("Triggering Teradata execution for query %s", splitId);
             executor.submit(this::triggerTeradataExecution);
         }
         splitsReturned.set(true);
@@ -127,129 +144,142 @@ public class TrinoExportDynamicFilteringSplitSource implements ConnectorSplitSou
 
     private void triggerTeradataExecution() {
         List<String> targetList = parseTargetList(targetIps);
-        try (Connection conn = getConnection()) {
-            // Generate SQL using Trino's DefaultQueryBuilder.prepareSelectQuery()
-            PreparedQuery innerQuery = generateSqlViaTrinoInfrastructure(conn);
-            log.info("Generated SQL via Trino JDBC for query %s: %s", splitId, innerQuery.query());
-            
-            String compressionAlgorithmName = config.isCompressionEnabled() ? 
-                    config.getCompressionAlgorithm().name() : "NONE";
-
-            // ONLY Teradata-specific addition: wrap with Table Operator UDF
-            // Pass limit and sortOrder for TOP/SAMPLE wrapping
-            String teradataSql = queryBuilder.buildExportQuery(
-                    innerQuery.query(),
-                    config.getUdfDatabase(),
-                    config.getUdfName(),
-                    targetIps,
-                    splitId,
-                    dynamicToken,
-                    config.getBatchSize(),
-                    compressionAlgorithmName,
-                    tableHandle.getLimit(),
-                    tableHandle.getSortOrder());
-
-
-            String logSql = teradataSql.replace(dynamicToken, "***DYNAMIC_TOKEN***");
-            log.info("Executing Teradata SQL for query %s: %s", splitId, logSql);
-
-            if (!targetList.isEmpty()) {
-                broadcastRegisterToken(targetList, dynamicToken);
+        boolean permitAcquired = false;
+        try {
+            permitAcquired = queryConcurrency.tryAcquire(60, TimeUnit.SECONDS);
+            if (!permitAcquired) {
+                throw new RuntimeException("Timed out waiting for Teradata export concurrency slot for " + splitId);
             }
 
-            try (java.sql.PreparedStatement stmt = conn.prepareStatement(teradataSql)) {
-                // Bind parameters from the inner query
-                List<io.trino.plugin.jdbc.QueryParameter> params = innerQuery.parameters();
-                
-                StringBuilder paramLog = new StringBuilder("Query Parameters: ");
-                for (io.trino.plugin.jdbc.QueryParameter p : params) {
-                    Object val = p.getValue().orElse(null);
-                    if (val instanceof Slice) {
-                        paramLog.append("[").append(((Slice) val).toStringUtf8()).append("] ");
-                    } else {
-                        paramLog.append("[").append(val).append("] ");
-                    }
+            try (Connection conn = getConnection()) {
+                PreparedQuery innerQuery = generateSqlViaTrinoInfrastructure(conn);
+                log.debug("Generated SQL via Trino JDBC for query %s: %s", splitId, innerQuery.query());
+
+                String compressionAlgorithmName = config.isCompressionEnabled()
+                        ? config.getCompressionAlgorithm().name() : "NONE";
+
+                String teradataSql = queryBuilder.buildExportQuery(
+                        innerQuery.query(),
+                        config.getUdfDatabase(),
+                        config.getUdfName(),
+                        targetIps,
+                        splitId,
+                        dynamicToken,
+                        config.getBatchSize(),
+                        compressionAlgorithmName,
+                        tableHandle.getLimit(),
+                        tableHandle.getSortOrder());
+
+                if (log.isDebugEnabled()) {
+                    log.debug("Executing Teradata SQL for query %s: %s",
+                            splitId, teradataSql.replace(dynamicToken, "***DYNAMIC_TOKEN***"));
                 }
-                log.info(paramLog.toString());
-                
-                for (int i = 0; i < params.size(); i++) {
-                    io.trino.plugin.jdbc.QueryParameter param = params.get(i);
-                    io.trino.plugin.jdbc.WriteMapping writeMapping = teradataClient.toWriteMapping(session, param.getType());
-                    io.trino.plugin.jdbc.WriteFunction writeFunction = writeMapping.getWriteFunction();
-                    Object value = param.getValue().orElse(null);
-                    
-                    if (value == null) {
-                        writeFunction.setNull(stmt, i + 1);
-                    } else {
-                        try {
-                            if (writeFunction instanceof LongWriteFunction) {
-                                ((LongWriteFunction) writeFunction).set(stmt, i + 1, ((Number) value).longValue());
-                            } else if (writeFunction instanceof DoubleWriteFunction) {
-                                ((DoubleWriteFunction) writeFunction).set(stmt, i + 1, ((Number) value).doubleValue());
-                            } else if (writeFunction instanceof BooleanWriteFunction) {
-                                ((BooleanWriteFunction) writeFunction).set(stmt, i + 1, (Boolean) value);
-                            } else if (writeFunction instanceof SliceWriteFunction) {
-                                ((SliceWriteFunction) writeFunction).set(stmt, i + 1, (Slice) value);
-                            } else if (writeFunction instanceof ObjectWriteFunction) {
-                                ((ObjectWriteFunction) writeFunction).set(stmt, i + 1, value);
-                            } else {
-                                log.warn("Unknown WriteFunction type %s, attempting generic setObject", writeFunction.getClass().getName());
-                                stmt.setObject(i + 1, value);
+
+                // Parallel token registration on all workers (latency-critical path)
+                if (!targetList.isEmpty()) {
+                    broadcastRegisterTokenParallel(targetList, dynamicToken);
+                }
+
+                try (java.sql.PreparedStatement stmt = conn.prepareStatement(teradataSql)) {
+                    List<io.trino.plugin.jdbc.QueryParameter> params = innerQuery.parameters();
+
+                    // INFO: required by integration LogValidationTest (query parameter markers)
+                    StringBuilder paramLog = new StringBuilder("Query Parameters: ");
+                    for (io.trino.plugin.jdbc.QueryParameter p : params) {
+                        Object val = p.getValue().orElse(null);
+                        if (val instanceof Slice) {
+                            paramLog.append("[").append(((Slice) val).toStringUtf8()).append("] ");
+                        }
+                        else {
+                            paramLog.append("[").append(val).append("] ");
+                        }
+                    }
+                    log.info(paramLog.toString());
+
+                    for (int i = 0; i < params.size(); i++) {
+                        io.trino.plugin.jdbc.QueryParameter param = params.get(i);
+                        io.trino.plugin.jdbc.WriteMapping writeMapping = teradataClient.toWriteMapping(session, param.getType());
+                        io.trino.plugin.jdbc.WriteFunction writeFunction = writeMapping.getWriteFunction();
+                        Object value = param.getValue().orElse(null);
+
+                        if (value == null) {
+                            writeFunction.setNull(stmt, i + 1);
+                        }
+                        else {
+                            try {
+                                if (writeFunction instanceof LongWriteFunction) {
+                                    ((LongWriteFunction) writeFunction).set(stmt, i + 1, ((Number) value).longValue());
+                                }
+                                else if (writeFunction instanceof DoubleWriteFunction) {
+                                    ((DoubleWriteFunction) writeFunction).set(stmt, i + 1, ((Number) value).doubleValue());
+                                }
+                                else if (writeFunction instanceof BooleanWriteFunction) {
+                                    ((BooleanWriteFunction) writeFunction).set(stmt, i + 1, (Boolean) value);
+                                }
+                                else if (writeFunction instanceof SliceWriteFunction) {
+                                    ((SliceWriteFunction) writeFunction).set(stmt, i + 1, (Slice) value);
+                                }
+                                else if (writeFunction instanceof ObjectWriteFunction) {
+                                    ((ObjectWriteFunction) writeFunction).set(stmt, i + 1, value);
+                                }
+                                else {
+                                    log.warn("Unknown WriteFunction type %s, attempting generic setObject", writeFunction.getClass().getName());
+                                    stmt.setObject(i + 1, value);
+                                }
                             }
-                        } catch (ClassCastException cce) {
-                            log.error("Failed to cast value %s (type %s) for WriteFunction %s", value, value.getClass().getName(), writeFunction.getClass().getName());
-                            throw cce;
-                        }
-                    }
-                }
-
-                log.info("Executing query for %s", splitId);
-                try (java.sql.ResultSet rs = stmt.executeQuery()) {
-                    log.info("Query executed, processing result set for %s", splitId);
-                    
-                    // DETERMINISTIC EOS: Collect AMP IDs for per-worker expected counts.
-                    // Each AMP sends TERADATA_FINISHED signal after data - no global coordination needed.
-                    List<Integer> ampIds = new ArrayList<>();
-                    while (rs.next()) {
-                        int ampId = rs.getInt(1);  // Column 1 = AMP unique ID from FNC_TblOpGetUniqID
-                        ampIds.add(ampId);
-                        String errorMsg = rs.getString(7);
-                        if (errorMsg != null && (errorMsg.startsWith("ERROR") || errorMsg.contains("failed"))) {
-                            log.error("Teradata UDF reported error: %s", errorMsg);
-                            throw new RuntimeException("Teradata UDF execution failed: " + errorMsg);
+                            catch (ClassCastException cce) {
+                                log.error("Failed to cast value %s (type %s) for WriteFunction %s",
+                                        value, value.getClass().getName(), writeFunction.getClass().getName());
+                                throw cce;
+                            }
                         }
                     }
 
-                    int rowCount = ampIds.size();
-                    
-                    // DETERMINISTIC EOS: Broadcast expected counts per worker (with retries for reliability)
-                    if (rowCount == 0) {
-                        // TRUE 0-row case: no AMPs executed because input was empty.
-                        log.info("Teradata UDF returned 0 rows for query %s. Marking as true 0-row case.", splitId);
-                        DataBufferRegistry.setExpectedTeradataSignals(splitId, 0);
-                        if (!targetList.isEmpty()) {
-                            broadcastExpectedConnectionsPerWorker(targetList, ampIds, dynamicToken);
+                    try (java.sql.ResultSet rs = stmt.executeQuery()) {
+                        // Collect ALL AMP routing ids first, then broadcast expected counts once.
+                        // Incremental broadcast is unsafe: status rows arrive after data for that AMP,
+                        // so raising expected=1 after the first AMP can EOS before the second AMP's
+                        // data is fully drained on a single-worker deployment.
+                        List<Integer> ampIds = new ArrayList<>();
+                        while (rs.next()) {
+                            int ampId = rs.getInt(1);
+                            ampIds.add(ampId);
+                            String errorMsg = rs.getString(7);
+                            if (errorMsg != null && (errorMsg.startsWith("ERROR") || errorMsg.contains("failed"))) {
+                                log.error("Teradata UDF reported error: %s", errorMsg);
+                                throw new RuntimeException("Teradata UDF execution failed: " + errorMsg);
+                            }
                         }
-                    } else {
-                        // Normal case: Calculate and broadcast expected connections per worker
-                        log.info("Teradata SQL execution finished for query %s (AMPs: %d). Broadcasting expected signals.", splitId, rowCount);
-                        if (!targetList.isEmpty()) {
-                            broadcastExpectedConnectionsPerWorker(targetList, ampIds, dynamicToken);
+
+                        int rowCount = ampIds.size();
+                        if (rowCount == 0) {
+                            DataBufferRegistry.setExpectedTeradataSignals(splitId, 0);
                         }
+                        if (!targetList.isEmpty()) {
+                            broadcastExpectedConnectionsPerWorkerParallel(targetList, ampIds, dynamicToken);
+                        }
+                        else {
+                            DataBufferRegistry.setExpectedTeradataSignals(splitId, rowCount);
+                        }
+
+                        log.debug("Teradata SQL execution finished for query %s (AMPs: %d)", splitId, rowCount);
                     }
-                    
-                    log.info("Teradata SQL execution finished successfully for query %s (Rows: %d)", splitId, rowCount);
                 }
             }
-        } catch (Exception e) {
+        }
+        catch (Exception e) {
             log.error(e, "Error executing Teradata SQL for query %s", splitId);
-            // On error, broadcast 0 expected to unblock waiting workers
             DataBufferRegistry.setExpectedTeradataSignals(splitId, 0);
             if (!targetList.isEmpty()) {
-                broadcastExpectedConnectionsPerWorker(targetList, new ArrayList<>(), dynamicToken);
+                broadcastExpectedConnectionsPerWorkerParallel(targetList, new ArrayList<>(), dynamicToken);
             }
             DataBufferRegistry.cleanupOnFailure(splitId);
             throw new RuntimeException("Teradata query execution failed for " + splitId + ": " + e.getMessage(), e);
+        }
+        finally {
+            if (permitAcquired) {
+                queryConcurrency.release();
+            }
         }
     }
 
@@ -372,102 +402,128 @@ public class TrinoExportDynamicFilteringSplitSource implements ConnectorSplitSou
      * Single attempt with short timeout - local bridge servers should always be reachable.
      * If broadcast fails, query will timeout via PageSource poll timeout.
      */
-    private void broadcastExpectedConnectionsPerWorker(List<String> targets, List<Integer> ampIds, String dynamicToken) {
-        if (targets == null || targets.isEmpty()) return;
-        
+    private void broadcastExpectedConnectionsPerWorkerParallel(List<String> targets, List<Integer> ampIds, String dynamicToken) {
+        if (targets == null || targets.isEmpty()) {
+            return;
+        }
+
         int numWorkers = targets.size();
-        
-        // Calculate expected connections per worker using deterministic routing.
-        // C UDF: assigned_worker_idx = ((unsigned)routing_amp_id) % worker_count
-        // and returns routing_amp_id as result column 1. Match with unsigned modulo.
         int[] expectedPerWorker = new int[numWorkers];
-        StringBuilder ampDebug = new StringBuilder();
         for (int ampId : ampIds) {
             int workerIdx = (int) (Integer.toUnsignedLong(ampId) % numWorkers);
             expectedPerWorker[workerIdx]++;
-            ampDebug.append(String.format("PID%d->w%d ", ampId, workerIdx));
         }
-        
-        log.info("DETERMINISTIC EOS: %d AMPs distributed across %d workers: %s (Details: %s)", 
-                ampIds.size(), numWorkers, java.util.Arrays.toString(expectedPerWorker), ampDebug.toString().trim());
-        
-        // Broadcast specific expected count to each worker (no retries - local servers should respond quickly)
-        for (int i = 0; i < targets.size(); i++) {
-            String target = targets.get(i);
-            if (target == null || target.isEmpty()) continue;
-            
-            int expected = expectedPerWorker[i];
-            
-            try {
-                String[] parts = target.split(":");
-                String host = parts[0];
-                int port = Integer.parseInt(parts[1]);
-                
-                try (Socket socket = new Socket()) {
-                    // Use connect timeout of 1 second for local server
-                    socket.connect(new java.net.InetSocketAddress(host, port), 1000);
-                    socket.setSoTimeout(1000);  // Read timeout 1 second
-                    
-                    DataOutputStream out = new DataOutputStream(socket.getOutputStream());
-                    
-                    if (dynamicToken != null) {
-                        byte[] tokenBytes = dynamicToken.getBytes(StandardCharsets.UTF_8);
-                        out.writeInt(tokenBytes.length);
-                        out.write(tokenBytes);
-                    }
-                    
-                    out.writeInt(TeradataBridgeServer.CONTROL_MAGIC);
-                    
-                    byte[] qidBytes = splitId.getBytes(StandardCharsets.UTF_8);
-                    out.writeInt(qidBytes.length);
-                    out.write(qidBytes);
-                    
-                    out.writeInt(3);  // EXPECTED_TERADATA_SIGNALS command
-                    out.writeInt(expected);
-                    out.flush();
-                    log.debug("Broadcast expected connections (%d) to worker %s for query %s", 
-                            expected, target, splitId);
-                }
-            } catch (Exception e) {
-                log.warn("Failed to broadcast expected connections to worker %s for query %s: %s", 
-                        target, splitId, e.getMessage());
-            }
-        }
+        finalBroadcastExpected(targets, expectedPerWorker, dynamicToken);
     }
 
-    private void broadcastRegisterToken(List<String> targets, String dynamicToken) {
-        if (targets == null || targets.isEmpty() || dynamicToken == null) return;
+    private void finalBroadcastExpected(List<String> targets, int[] expectedPerWorker, String dynamicToken) {
+        log.debug("DETERMINISTIC EOS: expected per worker: %s", java.util.Arrays.toString(expectedPerWorker));
 
-        for (String target : targets) {
-            if (target == null || target.isEmpty()) continue;
+        if (targets.size() == 1) {
+            DataBufferRegistry.setExpectedTeradataSignals(splitId, expectedPerWorker[0]);
+        }
 
-            try {
-                String[] parts = target.split(":");
-                String host = parts[0];
-                int port = Integer.parseInt(parts[1]);
+        List<CompletableFuture<Void>> futures = new ArrayList<>(targets.size());
+        for (int i = 0; i < targets.size(); i++) {
+            final String target = targets.get(i);
+            final int expected = expectedPerWorker[i];
+            if (target == null || target.isEmpty()) {
+                continue;
+            }
+            futures.add(CompletableFuture.runAsync(() -> sendExpectedCount(target, expected, dynamicToken), CONTROL_BROADCAST_EXECUTOR));
+        }
+        awaitBroadcasts(futures, "expected-count");
+    }
 
-                log.debug("Registering dynamic token on worker %s for query %s", target, splitId);
-                try (Socket socket = new Socket(host, port);
-                     DataOutputStream out = new DataOutputStream(socket.getOutputStream())) {
+    private void sendExpectedCount(String target, int expected, String dynamicToken) {
+        try {
+            String[] parts = target.split(":");
+            String host = parts[0];
+            int port = Integer.parseInt(parts[1]);
 
-                    socket.setSoTimeout(config.getBroadcastSocketTimeoutMs());
+            try (Socket socket = new Socket()) {
+                socket.connect(new InetSocketAddress(host, port), 1000);
+                socket.setSoTimeout(1000);
+                DataOutputStream out = new DataOutputStream(socket.getOutputStream());
 
+                if (dynamicToken != null) {
                     byte[] tokenBytes = dynamicToken.getBytes(StandardCharsets.UTF_8);
                     out.writeInt(tokenBytes.length);
                     out.write(tokenBytes);
-
-                    out.writeInt(TeradataBridgeServer.CONTROL_MAGIC);
-
-                    byte[] qidBytes = splitId.getBytes(StandardCharsets.UTF_8);
-                    out.writeInt(qidBytes.length);
-                    out.write(qidBytes);
-
-                    out.writeInt(5); // REGISTER_TOKEN command
-                    out.flush();
                 }
-            } catch (Exception e) {
-                log.warn("Failed to register dynamic token on worker %s: %s", target, e.getMessage());
+
+                out.writeInt(TeradataBridgeServer.CONTROL_MAGIC);
+
+                byte[] qidBytes = splitId.getBytes(StandardCharsets.UTF_8);
+                out.writeInt(qidBytes.length);
+                out.write(qidBytes);
+
+                out.writeInt(3); // EXPECTED_TERADATA_SIGNALS
+                out.writeInt(expected);
+                out.flush();
             }
+        }
+        catch (Exception e) {
+            log.warn("Failed to broadcast expected connections to worker %s for query %s: %s",
+                    target, splitId, e.getMessage());
+        }
+    }
+
+    private void broadcastRegisterTokenParallel(List<String> targets, String dynamicToken) {
+        if (targets == null || targets.isEmpty() || dynamicToken == null) {
+            return;
+        }
+
+        List<CompletableFuture<Void>> futures = new ArrayList<>(targets.size());
+        for (String target : targets) {
+            if (target == null || target.isEmpty()) {
+                continue;
+            }
+            futures.add(CompletableFuture.runAsync(() -> sendRegisterToken(target, dynamicToken), CONTROL_BROADCAST_EXECUTOR));
+        }
+        awaitBroadcasts(futures, "register-token");
+    }
+
+    private void sendRegisterToken(String target, String dynamicToken) {
+        try {
+            String[] parts = target.split(":");
+            String host = parts[0];
+            int port = Integer.parseInt(parts[1]);
+
+            try (Socket socket = new Socket()) {
+                socket.connect(new InetSocketAddress(host, port), config.getBroadcastSocketTimeoutMs());
+                socket.setSoTimeout(config.getBroadcastSocketTimeoutMs());
+                DataOutputStream out = new DataOutputStream(socket.getOutputStream());
+
+                byte[] tokenBytes = dynamicToken.getBytes(StandardCharsets.UTF_8);
+                out.writeInt(tokenBytes.length);
+                out.write(tokenBytes);
+
+                out.writeInt(TeradataBridgeServer.CONTROL_MAGIC);
+
+                byte[] qidBytes = splitId.getBytes(StandardCharsets.UTF_8);
+                out.writeInt(qidBytes.length);
+                out.write(qidBytes);
+
+                out.writeInt(5); // REGISTER_TOKEN
+                out.flush();
+            }
+        }
+        catch (Exception e) {
+            log.warn("Failed to register dynamic token on worker %s: %s", target, e.getMessage());
+        }
+    }
+
+    private void awaitBroadcasts(List<CompletableFuture<Void>> futures, String label) {
+        if (futures.isEmpty()) {
+            return;
+        }
+        try {
+            CompletableFuture.allOf(futures.toArray(CompletableFuture[]::new))
+                    .get(Math.max(2, config.getBroadcastSocketTimeoutMs() / 1000 + 1), TimeUnit.SECONDS);
+        }
+        catch (Exception e) {
+            log.warn("Broadcast %s for query %s did not complete cleanly: %s", label, splitId, e.getMessage());
         }
     }
 

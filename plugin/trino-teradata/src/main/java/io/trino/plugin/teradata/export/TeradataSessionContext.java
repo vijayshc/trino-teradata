@@ -36,6 +36,11 @@ import static java.util.Objects.requireNonNull;
 public final class TeradataSessionContext {
     private static final Logger log = Logger.get(TeradataSessionContext.class);
 
+    private static volatile Method cachedGetSessionMethod;
+    private static volatile Method cachedGetSchemaMethod;
+    private static volatile Class<?> cachedSessionClass;
+    private static volatile Class<?> cachedTrinoSessionClass;
+
     private TeradataSessionContext() {}
 
     public static void apply(Connection connection, ConnectorSession session, TrinoExportConfig config)
@@ -79,15 +84,27 @@ public final class TeradataSessionContext {
 
         // Public ConnectorSession SPI does not expose schema in Trino 479, but the runtime
         // FullConnectorSession wraps io.trino.Session, which does. Use reflection so the
-        // connector stays compiled only against trino-spi.
+        // connector stays compiled only against trino-spi. Methods are cached after first lookup.
         try {
-            Method getSessionMethod = session.getClass().getMethod("getSession");
+            Class<?> sessionClass = session.getClass();
+            Method getSessionMethod = cachedGetSessionMethod;
+            if (getSessionMethod == null || cachedSessionClass != sessionClass) {
+                getSessionMethod = sessionClass.getMethod("getSession");
+                cachedGetSessionMethod = getSessionMethod;
+                cachedSessionClass = sessionClass;
+            }
             Object trinoSession = getSessionMethod.invoke(session);
             if (trinoSession == null) {
                 return Optional.empty();
             }
 
-            Method getSchemaMethod = trinoSession.getClass().getMethod("getSchema");
+            Class<?> trinoSessionClass = trinoSession.getClass();
+            Method getSchemaMethod = cachedGetSchemaMethod;
+            if (getSchemaMethod == null || cachedTrinoSessionClass != trinoSessionClass) {
+                getSchemaMethod = trinoSessionClass.getMethod("getSchema");
+                cachedGetSchemaMethod = getSchemaMethod;
+                cachedTrinoSessionClass = trinoSessionClass;
+            }
             Object value = getSchemaMethod.invoke(trinoSession);
             if (value instanceof Optional<?> optional && optional.isPresent()) {
                 Object schema = optional.get();

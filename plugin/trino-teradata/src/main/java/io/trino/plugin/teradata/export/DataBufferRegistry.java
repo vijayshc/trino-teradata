@@ -60,9 +60,15 @@ public class DataBufferRegistry {
     
     // Timeout for expected count broadcast - if not received within this time, use fallback EOS logic
     private static final long EXPECTED_COUNT_TIMEOUT_MS = 60000; // 60 seconds
+
+    // Max wait for PageSource to register schema before AMP data arrives
+    private static final long SCHEMA_READY_TIMEOUT_MS = 30_000L;
     
     // Configurable queue capacity (set from TrinoExportConfig during initialization)
     private static int bufferQueueCapacity = 100;  // Default value
+
+    // Approximate bytes currently buffered across all queries (for memory reporting)
+    private static final AtomicInteger globalBufferedPages = new AtomicInteger(0);
     
     // NOTE: No TTL-based cleanup - all cleanup is deterministic via deregisterQuery/cleanupOnFailure
 
@@ -82,15 +88,19 @@ public class DataBufferRegistry {
         // Timeout tracking for expected count fallback
         volatile boolean timeoutFallbackScheduled = false;
         
-        // DETERMINISTIC EOS: Track expected vs received TERADATA_FINISHED signals
-        // With deterministic routing, coordinator sets exact expected count per worker
-        // Each AMP sends TERADATA_FINISHED signal after data transfer completes
+        // DETERMINISTIC EOS: expected AMP data connections for this worker.
+        // Primary completion signal is data-socket close after all pages are pushed
+        // (push-before-decrement). Optional TERADATA_FINISHED control messages still count
+        // but are no longer required, removing a second TCP round-trip per AMP.
         final AtomicInteger expectedTeradataSignals = new AtomicInteger(-1);
         final AtomicInteger receivedTeradataSignals = new AtomicInteger(0);
         
         // Track total connections opened and closed for sanity checks
         final AtomicInteger totalConnectionsOpened = new AtomicInteger(0);
         final AtomicInteger totalConnectionsClosed = new AtomicInteger(0);
+
+        // Approximate buffered page count for this query
+        final AtomicInteger bufferedPages = new AtomicInteger(0);
         
         // Error signaling for immediate failure propagation
         volatile Exception queryError = null;
@@ -113,14 +123,12 @@ public class DataBufferRegistry {
 
         /**
          * Check and signal end-of-stream.
-         * 
+         *
          * DETERMINISTIC EOS LOGIC:
-         * - Coordinator broadcasts exact expected count per worker using amp_id % num_workers routing
-         * - Each AMP sends TERADATA_FINISHED signal after data transfer completes
-         * - EOS when: all expected connections closed AND all expected TERADATA_FINISHED signals received
-         * 
-         * CRITICAL: The expected count broadcast MUST succeed (using reliable retry logic)
-         * for this EOS mechanism to work correctly.
+         * - Coordinator broadcasts exact expected AMP connection count per worker
+         * - Each AMP data connection pushes all pages then decrements (push-before-decrement)
+         * - EOS when: expected is known AND active==0 AND closed &gt;= expected
+         * - Optional TERADATA_FINISHED control messages are accepted but not required
          */
         void checkAndSignalEos(String queryId) {
             int markerCount = 0;
@@ -150,14 +158,15 @@ public class DataBufferRegistry {
                             return;
                         }
                     } else {
-                        // Wait for all expected connections to complete
-                        boolean allClosed = (active == 0) && (closed >= expected);
-                        boolean allReceived = (received >= expected);
+                        // Connection-close is authoritative (data fully buffered before decrement).
+                        // Treat closed count as sufficient; finished signals only help fallback paths.
+                        int completed = Math.max(closed, received);
+                        boolean allDone = (active == 0) && (completed >= expected);
                         
-                        if (allClosed && allReceived) {
+                        if (allDone) {
                             shouldEos = true;
-                            log.debug("EOS for query %s - all %d connections completed (deterministic)", 
-                                    queryId, expected);
+                            log.debug("EOS for query %s - all %d connections completed (deterministic, closed=%d received=%d)", 
+                                    queryId, expected, closed, received);
                         }
                     }
                 } else {
@@ -175,7 +184,7 @@ public class DataBufferRegistry {
                 }
                 
                 if (shouldEos) {
-                    log.info("Signaling EOS for query %s: expected=%d, opened=%d, closed=%d, received=%d, consumers=%d", 
+                    log.debug("Signaling EOS for query %s: expected=%d, opened=%d, closed=%d, received=%d, consumers=%d", 
                             queryId, expected, opened, closed, received, consumers);
                     eosSignaled = true;
                     // Use actual active consumers, not expectedConsumers which may be wrong in multi-worker setup
@@ -246,7 +255,7 @@ public class DataBufferRegistry {
                 
                 // FALLBACK LOGIC: If we had connections and they're all closed, signal EOS
                 // This handles the case where expected count broadcast failed
-                if (hadAnyConnections && active == 0 && closed > 0 && received >= closed) {
+                if (hadAnyConnections && active == 0 && closed > 0) {
                     log.warn("TIMEOUT FALLBACK EOS for query %s: expected count never received, " +
                             "using connection-based heuristic (opened=%d, closed=%d, received=%d)",
                             queryId, opened, closed, received);
@@ -305,7 +314,7 @@ public class DataBufferRegistry {
         synchronized boolean deregisterConsumer() {
             activeConsumers.decrementAndGet();
             int finished = totalFinishedConsumers.incrementAndGet();
-            
+
             // Return true if we should fully clean up this query
             return finished >= expectedConsumers;
         }
@@ -348,27 +357,27 @@ public class DataBufferRegistry {
         QueryBuffer buffer = queryBuffers.get(queryId);
         if (buffer != null) {
             if (!buffer.deregisterConsumer()) {
-                log.debug("Consumer closed for query %s. %d/%d finished.", 
+                log.debug("Consumer closed for query %s. %d/%d finished.",
                         queryId, buffer.totalFinishedConsumers.get(), buffer.expectedConsumers);
                 return;
             }
-            
+
             queryBuffers.remove(queryId);
             // Also clean up schema registry, token registry, and performance profiler entries
             schemaRegistry.remove(queryId);
             dynamicTokenRegistry.remove(queryId);
             PerformanceProfiler.clear(queryId);
-            
-            log.debug("Deregistered buffer, schema, and profiler for query %s. All %d consumers finished.", 
+
+            log.debug("Deregistered buffer, schema, and profiler for query %s. All %d consumers finished.",
                     queryId, buffer.totalFinishedConsumers.get());
             while (!buffer.queue.isEmpty()) {
                 BatchContainer container = buffer.queue.poll();
                 if (container != null && !container.isEndOfStream()) {
                     try {
-                    // Page doesn't need explicit closing like Arrow
-                    // But if Page had native resources they would be released here
-                    container = null;
-                    } catch (Exception e) {
+                        // Page doesn't need explicit closing like Arrow
+                        container = null;
+                    }
+                    catch (Exception e) {
                         log.warn("Error during cleanup for query %s: %s", queryId, e.getMessage());
                     }
                 }
@@ -517,13 +526,19 @@ public class DataBufferRegistry {
         if (buffer == null) {
             return false;
         }
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(SCHEMA_READY_TIMEOUT_MS);
         synchronized (buffer) {
             while (!buffer.schemaReady) {
                 if (!hasDynamicToken(queryId)) {
                     return false;
                 }
+                long remainingMs = TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime());
+                if (remainingMs <= 0) {
+                    log.warn("Timed out waiting for schema ready for query %s after %d ms", queryId, SCHEMA_READY_TIMEOUT_MS);
+                    return false;
+                }
                 try {
-                    buffer.wait();
+                    buffer.wait(Math.min(remainingMs, 1000L));
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     return false;
@@ -543,12 +558,42 @@ public class DataBufferRegistry {
         if (buffer != null) {
             buffer.updateActivity();
             try {
-                // log.debug("Pushing batch with %d rows for query %s", page.getPositionCount(), queryId);
                 buffer.queue.put(BatchContainer.of(page));
+                buffer.bufferedPages.incrementAndGet();
+                globalBufferedPages.incrementAndGet();
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
         }
+    }
+
+    /**
+     * Poll a page container and update buffered-page accounting.
+     */
+    public static BatchContainer pollData(String queryId, long timeoutMs) throws InterruptedException {
+        QueryBuffer buffer = queryBuffers.get(queryId);
+        if (buffer == null) {
+            return null;
+        }
+        BatchContainer container = buffer.queue.poll(timeoutMs, TimeUnit.MILLISECONDS);
+        if (container != null && !container.isEndOfStream()) {
+            buffer.bufferedPages.decrementAndGet();
+            globalBufferedPages.decrementAndGet();
+        }
+        return container;
+    }
+
+    public static long estimateBufferedBytes(String queryId) {
+        QueryBuffer buffer = queryBuffers.get(queryId);
+        if (buffer == null) {
+            return 0;
+        }
+        // Rough estimate: assume average page ~256KB when present
+        return Math.max(0, buffer.bufferedPages.get()) * 256L * 1024L;
+    }
+
+    public static int getGlobalBufferedPages() {
+        return globalBufferedPages.get();
     }
 
     public static void pushEndMarker(String queryId) {

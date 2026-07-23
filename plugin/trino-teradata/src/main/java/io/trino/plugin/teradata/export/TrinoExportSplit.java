@@ -84,6 +84,7 @@ public class TrinoExportSplit implements ConnectorSplit {
 
     @Override
     public List<HostAddress> getAddresses() {
+        // workerHost may be "host" or "host:httpPort" (co-located multi-JVM distinction)
         return List.of(HostAddress.fromString(workerHost));
     }
 

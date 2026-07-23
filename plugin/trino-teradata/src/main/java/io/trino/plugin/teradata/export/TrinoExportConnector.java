@@ -66,13 +66,13 @@ public class TrinoExportConnector implements Connector {
                 config.getBufferQueueCapacity(), config.getPagePollTimeoutMs(), config.isEnableDebugLogging(),
                 config.getTeradataTimezone(), tzOffsetSeconds);
         
-        // Start bridge server and flight server explicitly (since @PostConstruct is not processed by Guice)
+        // Start bridge server (hot path). Flight is legacy and optional — bind failure must not
+        // take down the catalog (port conflicts are common on multi-node labs).
         bridgeServer.start();
         try {
             flightServer.start();
         } catch (java.io.IOException e) {
-            log.error(e, "Failed to start flight server");
-            throw new RuntimeException("Failed to start flight server", e);
+            log.warn(e, "Legacy Flight server failed to start (unused on hot path); continuing with bridge only");
         }
     }
 
@@ -132,7 +132,7 @@ public class TrinoExportConnector implements Connector {
 
     @Override
     public ConnectorMetadata getMetadata(ConnectorSession session, ConnectorTransactionHandle transactionHandle) {
-        log.info("getMetadata called for query %s", session.getQueryId());
+        log.debug("getMetadata called for query %s", session.getQueryId());
         return metadata;
     }
 

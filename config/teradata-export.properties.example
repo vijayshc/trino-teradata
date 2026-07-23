@@ -41,10 +41,15 @@ teradata.export.batch-size=500000
 teradata.export.socket-receive-buffer-size=134217728
 teradata.export.input-buffer-size=16777216
 teradata.export.buffer-queue-capacity=500
-teradata.export.page-poll-timeout-ms=100
+teradata.export.page-poll-timeout-ms=50
 teradata.export.compression-enabled=true
 teradata.export.compression-algorithm=LZ4
-teradata.export.splits-per-worker=4
+teradata.export.splits-per-worker=2
+teradata.export.max-query-concurrency=20
+teradata.export.connection-pool-min-size=10
+teradata.export.connection-pool-max-size=64
+teradata.export.bridge-core-pool-size=32
+teradata.export.max-bridge-threads=400
 
 # ============================================================
 # Pushdown

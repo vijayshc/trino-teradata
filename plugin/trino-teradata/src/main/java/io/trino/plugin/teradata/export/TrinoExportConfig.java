@@ -37,15 +37,14 @@ public class TrinoExportConfig {
     private String workerAdvertisedAddresses;  // For NAT/multi-homed networks
 
     // === Buffer/Performance Settings ===
-    // Option G: Increase Batch Size Dramatically
-    private int batchSize = 500000;  // 5x larger batches reduce per-batch overhead
+    private int batchSize = 500000;  // Large batches reduce per-batch overhead on big scans
     private int socketReceiveBufferSize = 128 * 1024 * 1024;  // 128MB for high-bandwidth networks
     private int inputBufferSize = 16 * 1024 * 1024;           // 16MB
     private int bufferQueueCapacity = 500;  // Higher capacity for burst tolerance
-    private long pagePollTimeoutMs = 100;   // More aggressive polling
-    private int splitsPerWorker = 8;        // Match available CPU cores, not AMPs
+    private long pagePollTimeoutMs = 50;    // Lower poll latency under load
+    private int splitsPerWorker = 2;        // Enough consumer parallelism without split fan-out tax
     private boolean compressionEnabled = true;  // Enable by default for max throughput
-    private CompressionAlgorithm compressionAlgorithm = CompressionAlgorithm.ZLIB;
+    private CompressionAlgorithm compressionAlgorithm = CompressionAlgorithm.LZ4;
     
     public enum CompressionAlgorithm {
         ZLIB, LZ4
@@ -73,10 +72,12 @@ public class TrinoExportConfig {
     private boolean enableDebugLogging = false;
 
     // === Scalability Settings ===
-    private int maxQueryConcurrency = 50;
-    private int maxBridgeThreads = 200;
-    private int bridgeCorePoolSize = 10;
-    private int bridgeQueueCapacity = 500;
+    // Soft cap on concurrent Teradata export executions (admission control).
+    // Too high thrashes TD sessions and collapses QPM; 16-24 is a strong default for labs.
+    private int maxQueryConcurrency = 20;
+    private int maxBridgeThreads = 400;
+    private int bridgeCorePoolSize = 32;
+    private int bridgeQueueCapacity = 1000;
 
     // === Cache Settings ===
     private int metadataCacheSize = 1000;
@@ -99,12 +100,12 @@ public class TrinoExportConfig {
     private int domainCompactionThreshold = 100;
 
     // === Connection Pool Settings ===
-    private int connectionPoolMinSize = 5;
-    private int connectionPoolMaxSize = 20;
+    private int connectionPoolMinSize = 10;
+    private int connectionPoolMaxSize = 64;
     private long connectionPoolMaxIdleMs = 300000L;  // 5 minutes
 
     // === Executor Thread Pool Settings ===
-    private int executorCorePoolSize = 20;  // Core threads for split executor
+    private int executorCorePoolSize = 32;  // Core threads for split executor
 
     // ============================================================
     // Core Connection Getters/Setters
